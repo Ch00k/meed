@@ -1,0 +1,17 @@
+services:
+  meed:
+    build: .
+    volumes:
+      - ./data:/data
+    environment:
+      MEED_FEEDS_FILE_PATH: /data/feeds.txt
+      MEED_STATE_DB_PATH: /data/state.db
+      MEED_SMTP_HOST: ${MEED_SMTP_HOST}
+      MEED_SMTP_PORT: ${MEED_SMTP_PORT}
+      MEED_SMTP_USER: ${MEED_SMTP_USER}
+      MEED_SMTP_PASSWORD: ${MEED_SMTP_PASSWORD}
+      MEED_EMAIL_FROM: ${MEED_EMAIL_FROM}
+      MEED_EMAIL_TO: ${MEED_EMAIL_TO}
+      MEED_CRON_SCHEDULE: "${MEED_CRON_SCHEDULE:-0 */4 * * *}"
+      MEED_SENTRY_DSN: ${MEED_SENTRY_DSN}
+    restart: unless-stopped
