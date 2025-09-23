@@ -1,6 +1,7 @@
 services:
   meed:
     build: .
+    pull_policy: build
     volumes:
       - ./data:/data
     environment:
