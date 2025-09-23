@@ -15,4 +15,5 @@ services:
       MEED_EMAIL_TO: ${MEED_EMAIL_TO}
       MEED_CRON_SCHEDULE: "${MEED_CRON_SCHEDULE:-0 */4 * * *}"
       MEED_SENTRY_DSN: ${MEED_SENTRY_DSN}
+      TZ: Europe/Amsterdam
     restart: unless-stopped
