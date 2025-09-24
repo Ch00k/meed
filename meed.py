@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
+
+class InvalidFeedEntryError(Exception):
+    """Raised when a feed entry cannot be parsed due to missing required fields."""
+
+
 env = environs.Env()
 
 FEEDS_FILE_PATH = env.path("MEED_FEEDS_FILE_PATH")
@@ -54,17 +59,49 @@ def get_db_cursor():
 
 
 class FeedEntry(BaseModel):
-    id: str | None = None
-    title: str | None = None
-    link: str | None = None
-    summary: str | None = None
+    id: str
+    title: str
+    summary: str
+    link: str
     published: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_fields(cls, value):
+        # Ensure id field exists
+        if not value.get("id"):
+            logger.warning("FeedEntry has no ID, attempting to use link or title as ID")
+            if value.get("link"):
+                logger.warning("Using link as ID")
+                value["id"] = value["link"]
+            elif value.get("title"):
+                logger.warning("Using title as ID")
+                value["id"] = value["title"]
+            else:
+                raise InvalidFeedEntryError("FeedEntry must have either ID, link, or title")
+
+        # Ensure title field exists
+        if not value.get("title"):
+            logger.warning(f"FeedEntry {value['id']} has no title, using ID as title")
+            value["title"] = value["id"]
+
+        # Ensure link field exists
+        if not value.get("link"):
+            logger.warning(f"FeedEntry {value['id']} has no link, using ID as link")
+            value["link"] = value["id"]
+
+        # Ensure summary field exists
+        if not value.get("summary"):
+            logger.warning(f"FeedEntry {value['id']} has no summary, using ID as summary")
+            value["summary"] = value["id"]
+
+        return value
 
     def send_notification(self, feed_title: str) -> None:
         msg = MIMEText(f"{self.link}<br><br>{self.summary}", "html", "utf-8")
         msg["From"] = f"{feed_title} <{EMAIL_FROM}>"
         msg["To"] = EMAIL_TO
-        msg["Subject"] = self.title or "New entry"
+        msg["Subject"] = self.title
 
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
@@ -74,12 +111,28 @@ class FeedEntry(BaseModel):
 
 class FeedMetadata(BaseModel):
     id: str
-    title: str | None = None
+    title: str
 
 
 class Feed(BaseModel):
     metadata: FeedMetadata = Field(alias="feed")
     entries: list[FeedEntry] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def filter_invalid_entries(cls, value):
+        if "entries" in value and isinstance(value["entries"], list):
+            valid_entries = []
+            for entry_data in value["entries"]:
+                try:
+                    # Create and validate FeedEntry instance
+                    valid_entry = FeedEntry(**entry_data)
+                    valid_entries.append(valid_entry)
+                except InvalidFeedEntryError as e:
+                    logger.warning(f"Skipping invalid entry: {e}")
+                    continue
+            value["entries"] = valid_entries
+        return value
 
     @model_validator(mode="after")
     def sort_entries(self) -> "Feed":
@@ -91,6 +144,18 @@ class Feed(BaseModel):
     @classmethod
     def from_url(cls, url: str) -> "Feed":
         parsed_feed = feedparser.parse(url)
+
+        if "feed" in parsed_feed:
+            logger.info(f"Replacing feed ID with URL for feed {url}")
+            parsed_feed["feed"]["id"] = url
+
+            if not parsed_feed["feed"].get("title"):
+                logger.warning(f"Feed {url} has no title, using URL as title")
+                parsed_feed["feed"]["title"] = url
+        else:
+            logger.warning(f"Feed {url} has no feed metadata, using URL as ID and title")
+            parsed_feed["feed"] = {"id": url, "title": url}
+
         return cls(**parsed_feed)
 
     def get_new_entries(self, last_id: str | None) -> list[FeedEntry]:
