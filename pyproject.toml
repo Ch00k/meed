@@ -8,6 +8,7 @@ dependencies = [
     "apscheduler>=3.11.0",
     "environs>=14.3.0",
     "feedparser>=6.0.12",
+    "json-log-formatter>=1.1.1",
     "pydantic>=2.11.9",
     "sentry-sdk>=2.38.0",
 ]

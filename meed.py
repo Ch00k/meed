@@ -1,6 +1,5 @@
 import logging
 import signal
-import smtplib
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -15,9 +14,34 @@ import sentry_sdk
 from apscheduler.events import EVENT_JOB_ERROR
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+from json_log_formatter import BUILTIN_ATTRS, JSONFormatter
 from pydantic import BaseModel, Field, model_validator
 
+BUILTIN_ATTRS.add("taskName")
+
 logger = logging.getLogger(__name__)
+
+
+class MeedJSONFormatter(JSONFormatter):
+    def extra_from_record(self, record: logging.LogRecord) -> dict:
+        return {
+            attr_name: record.__dict__[attr_name] for attr_name in record.__dict__ if attr_name not in BUILTIN_ATTRS
+        }
+
+    def json_record(self, message: str, extra: dict, record: logging.LogRecord) -> dict:
+        new_extra: dict[str, Any] = {}
+
+        new_extra["timestamp"] = datetime.fromtimestamp(record.created).isoformat(timespec="microseconds") + "Z"
+        new_extra["level"] = record.levelname
+        new_extra["logger"] = record.name
+        new_extra["module"] = record.module
+        new_extra["function"] = record.funcName
+        new_extra["task"] = record.taskName
+        new_extra["stack_trace"] = self.formatException(record.exc_info) if record.exc_info else None
+        new_extra["message"] = message
+
+        new_extra["extra"] = str(extra) if extra else None
+        return new_extra
 
 
 class InvalidFeedEntryError(Exception):
@@ -103,9 +127,9 @@ class FeedEntry(BaseModel):
         msg["To"] = EMAIL_TO
         msg["Subject"] = self.title
 
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        # with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+        #     server.login(SMTP_USER, SMTP_PASSWORD)
+        #     server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
 
 
 class FeedMetadata(BaseModel):
@@ -275,7 +299,13 @@ def main(run_once: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # Configure logging with custom JSON formatter
+    handler = logging.StreamHandler()
+    handler.setFormatter(MeedJSONFormatter())
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(handler)
 
     if SENTRY_DSN:
         sentry_sdk.init(dsn=SENTRY_DSN)
