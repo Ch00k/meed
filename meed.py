@@ -104,7 +104,6 @@ class FeedEntry(BaseModel):
         msg["Subject"] = self.title
 
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
             server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
 
@@ -191,9 +190,9 @@ class Feed(BaseModel):
             logger.info("No new entries found")
 
         for entry in new_entries:
-            title = entry.title or "No Title"
+            title = entry.title
             logger.info(f"Sending notification for entry {title} ({entry.link})")
-            entry.send_notification(self.metadata.title or "No Title")
+            entry.send_notification(self.metadata.title)
 
         if new_entries:
             logger.info(f"Updating state for feed {self.metadata.title}")
