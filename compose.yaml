@@ -16,4 +16,12 @@ services:
       MEED_CRON_SCHEDULE: "${MEED_CRON_SCHEDULE:-0 */4 * * *}"
       MEED_SENTRY_DSN: ${MEED_SENTRY_DSN}
       TZ: Europe/Amsterdam
+    logging:
+      driver: fluentd
+      options:
+        fluentd-async: "true"
+        tag: docker-compose.meed.app
+        labels: fluentbit-es-index
+    labels:
+      - fluentbit-es-index=fluentbit.meed.app
     restart: unless-stopped
