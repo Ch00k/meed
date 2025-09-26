@@ -127,9 +127,9 @@ class FeedEntry(BaseModel):
         msg["To"] = EMAIL_TO
         msg["Subject"] = self.title
 
-        # with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-        #     server.login(SMTP_USER, SMTP_PASSWORD)
-        #     server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
 
 
 class FeedMetadata(BaseModel):
