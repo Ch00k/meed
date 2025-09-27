@@ -128,7 +128,7 @@ class FeedEntry(BaseModel):
 
     def send_notification(self, feed_title: str) -> None:
         msg = MIMEText(f"{self.link}<br><br>{self.summary}", "html", "utf-8")
-        msg["From"] = f"{feed_title} <{EMAIL_FROM}>"
+        msg["From"] = f'"{feed_title}" <{EMAIL_FROM}>'
         msg["To"] = EMAIL_TO
         msg["Subject"] = self.title
 
