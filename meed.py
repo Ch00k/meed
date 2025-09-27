@@ -15,6 +15,7 @@ import sentry_sdk
 from apscheduler.events import EVENT_JOB_ERROR
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+from dateutil import parser as date_parser
 from json_log_formatter import BUILTIN_ATTRS, JSONFormatter
 from pydantic import BaseModel, Field, model_validator
 
@@ -88,7 +89,7 @@ class FeedEntry(BaseModel):
     title: str
     summary: str
     link: str
-    published: str | None = None
+    published: datetime
 
     @model_validator(mode="before")
     @classmethod
@@ -119,6 +120,9 @@ class FeedEntry(BaseModel):
         if not value.get("summary"):
             logger.warning(f"FeedEntry {value['id']} has no summary, using ID as summary")
             value["summary"] = value["id"]
+
+        # Parse published date
+        value["published"] = date_parser.parse(value["published"])
 
         return value
 
@@ -161,8 +165,8 @@ class Feed(BaseModel):
     @model_validator(mode="after")
     def sort_entries(self) -> "Feed":
         if self.entries:
-            # Sort entries by published date, newest first, None values last
-            self.entries.sort(key=lambda e: (e.published is not None, e.published), reverse=True)
+            # Sort entries by published date, newest first
+            self.entries.sort(key=lambda e: e.published, reverse=True)
         return self
 
     @classmethod
@@ -193,8 +197,8 @@ class Feed(BaseModel):
 
             new_entries.append(entry)
 
-        # Sort new entries by published date, oldest first, None values last
-        return sorted(new_entries, key=lambda e: (e.published is not None, e.published))
+        # Sort new entries by published date, oldest first
+        return sorted(new_entries, key=lambda e: e.published)
 
     def process(self) -> None:
         if not self.is_known():
@@ -228,21 +232,30 @@ class Feed(BaseModel):
 
     def get_state(self) -> tuple[datetime | None, str | None]:
         with get_db_cursor() as cursor:
+            logger.debug("Executing SQL: %s with params (%s)", SQL_GET_STATE, self.metadata.id)
             cursor.execute(SQL_GET_STATE, (self.metadata.id,))
             row = cursor.fetchone()
 
-        return (datetime.fromisoformat(row[0]), row[1]) if row else (None, None)
+        result = (datetime.fromisoformat(row[0]), row[1]) if row else (None, None)
+        logger.debug("Fetched state from DB: %s", result)
+
+        return result
 
     def create_state(self) -> None:
         if self.is_known():
             return
 
+        last_entry = self.entries[0].id if self.entries else None
         with get_db_cursor() as cursor:
-            cursor.execute(SQL_CREATE_STATE, (self.metadata.id, self.entries[0].id if self.entries else None))
+            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_CREATE_STATE, self.metadata.id, last_entry)
+            cursor.execute(SQL_CREATE_STATE, (self.metadata.id, last_entry))
 
     def update_state(self) -> None:
+        last_entry = self.entries[0].id if self.entries else None
+
         with get_db_cursor() as cursor:
-            cursor.execute(SQL_UPDATE_STATE, (self.entries[0].id if self.entries else None, self.metadata.id))
+            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_UPDATE_STATE, last_entry, self.metadata.id)
+            cursor.execute(SQL_UPDATE_STATE, (last_entry, self.metadata.id))
 
 
 def read_feeds_file(file_path: Path) -> list:
@@ -266,9 +279,21 @@ def check_feeds() -> None:
 
     for feed_url in feed_urls:
         logger.info(f"Processing feed {feed_url}")
-        feed = Feed.from_url(feed_url)
+        try:
+            feed = Feed.from_url(feed_url)
+        except Exception as e:
+            logger.error(f"Error fetching or parsing feed {feed_url}: {e}")
+            sentry_sdk.capture_exception(e)
+            continue
+
         logger.info(f"Feed title: {feed.metadata.title}")
-        feed.process()
+
+        try:
+            feed.process()
+        except Exception as e:
+            logger.error(f"Error processing feed {feed.metadata.title}: {e}")
+            sentry_sdk.capture_exception(e)
+            continue
 
 
 def job():
@@ -315,7 +340,7 @@ if __name__ == "__main__":
     handler.setFormatter(MeedJSONFormatter())
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG)
     root_logger.addHandler(handler)
 
     if SENTRY_DSN:
