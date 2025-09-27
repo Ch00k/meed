@@ -1,5 +1,6 @@
 import logging
 import signal
+import smtplib
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -270,6 +271,14 @@ def check_feeds() -> None:
         feed.process()
 
 
+def job():
+    try:
+        check_feeds()
+    except Exception as e:
+        logger.error(f"Error in scheduled job: {e}")
+        sentry_sdk.capture_exception(e)
+
+
 def sentry_listener(event):
     if event.exception:
         sentry_sdk.capture_exception(event.exception)
@@ -286,8 +295,10 @@ def main(run_once: bool = False) -> None:
     logger.info(f"Creating schedule with crontab '{CRON_SCHEDULE}'")
 
     scheduler = BlockingScheduler()
+
+    # TODO: This does not seem to work - nothing in Sentry
     scheduler.add_listener(sentry_listener, mask=EVENT_JOB_ERROR)
-    scheduler.add_job(check_feeds, CronTrigger.from_crontab(CRON_SCHEDULE))
+    scheduler.add_job(job, CronTrigger.from_crontab(CRON_SCHEDULE))
 
     def signal_handler_scheduler(signum: int, _: Any) -> None:
         scheduler.shutdown()
