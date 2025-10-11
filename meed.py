@@ -121,8 +121,14 @@ class FeedEntry(BaseModel):
             logger.warning(f"FeedEntry {value['id']} has no summary, using ID as summary")
             value["summary"] = value["id"]
 
+        # Determine published date
+        published_date = value.get("published") or value.get("updated") or value.get("created")
+        if not published_date:
+            logger.warning(f"FeedEntry {value['id']} has no published date, skipping entry")
+            raise InvalidFeedEntryError("FeedEntry must have a published, updated, or created date")
+
         # Parse published date
-        value["published"] = date_parser.parse(value["published"])
+        value["published"] = date_parser.parse(published_date)
 
         return value
 
