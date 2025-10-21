@@ -39,6 +39,7 @@ ignore = [
     "G004",     # logging f-string
     "ISC001",   # single-line-implicit-string-concatenation
     "PLC0415",  # import should be at top-level
+    "PLR0913",  # too many arguments
     "PLR2004",  # magic value used in comparison
     "S101",     # use of assert (fine in tests)
     "SIM108",   # ternary operator

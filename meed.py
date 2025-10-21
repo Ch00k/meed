@@ -65,7 +65,7 @@ SMTP_PASSWORD = env.str("MEED_SMTP_PASSWORD")
 EMAIL_FROM = env.str("MEED_EMAIL_FROM")
 EMAIL_TO = env.str("MEED_EMAIL_TO")
 
-CRON_SCHEDULE = env.str("MEED_CRON_SCHEDULE", "0 */4 * * *")  # Every 4 hours
+CRON_SCHEDULE = env.str("MEED_CRON_SCHEDULE", "0 */4 * * *")
 
 SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 

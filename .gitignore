@@ -1,2 +1,4 @@
 feeds.txt
 state.db
+.coverage
+coverage.xml
