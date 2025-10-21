@@ -3,16 +3,18 @@ import signal
 import smtplib
 import sqlite3
 import sys
+from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from email.mime.text import MIMEText
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import environs
 import feedparser
 import sentry_sdk
-from apscheduler.events import EVENT_JOB_ERROR
+from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dateutil import parser as date_parser
@@ -33,7 +35,7 @@ class MeedJSONFormatter(JSONFormatter):
     def json_record(self, message: str, extra: dict, record: logging.LogRecord) -> dict:
         new_extra: dict[str, Any] = {}
 
-        new_extra["timestamp"] = datetime.fromtimestamp(record.created).isoformat(timespec="microseconds") + "Z"
+        new_extra["timestamp"] = datetime.fromtimestamp(record.created, tz=UTC).isoformat(timespec="microseconds") + "Z"
         new_extra["level"] = record.levelname
         new_extra["logger"] = record.name
         new_extra["module"] = record.module
@@ -74,7 +76,7 @@ SQL_UPDATE_STATE = "UPDATE feeds SET last_checked_at = datetime('now'), last_ent
 
 
 @contextmanager
-def get_db_cursor():
+def get_db_cursor() -> Generator[sqlite3.Cursor, None, None]:
     conn = sqlite3.connect(STATE_DB_PATH)
     cursor = conn.cursor()
     try:
@@ -93,7 +95,7 @@ class FeedEntry(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def ensure_fields(cls, value):
+    def ensure_fields(cls, value: dict[str, Any]) -> dict[str, Any]:
         # Ensure id field exists
         if not value.get("id"):
             logger.warning("FeedEntry has no ID, attempting to use link or title as ID")
@@ -154,7 +156,7 @@ class Feed(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def filter_invalid_entries(cls, value):
+    def filter_invalid_entries(cls, value: dict[str, Any]) -> dict[str, Any]:
         if "entries" in value and isinstance(value["entries"], list):
             valid_entries = []
             for entry_data in value["entries"]:
@@ -181,16 +183,16 @@ class Feed(BaseModel):
 
         if "feed" in parsed_feed:
             logger.info(f"Replacing feed ID with URL for feed {url}")
-            parsed_feed["feed"]["id"] = url
+            parsed_feed["feed"]["id"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
 
-            if not parsed_feed["feed"].get("title"):
+            if not parsed_feed["feed"].get("title"):  # pyright: ignore[reportAttributeAccessIssue]
                 logger.warning(f"Feed {url} has no title, using URL as title")
-                parsed_feed["feed"]["title"] = url
+                parsed_feed["feed"]["title"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
         else:
             logger.warning(f"Feed {url} has no feed metadata, using URL as ID and title")
             parsed_feed["feed"] = {"id": url, "title": url}
 
-        return cls(**parsed_feed)
+        return cls(**parsed_feed)  # pyright: ignore[reportArgumentType]
 
     def get_new_entries(self, last_id: str | None) -> list[FeedEntry]:
         if not last_id:
@@ -269,10 +271,8 @@ def read_feeds_file(file_path: Path) -> list:
         logger.warning(f"Feeds file {file_path} does not exist.")
         return []
 
-    with open(file_path) as f:
-        feed_urls = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-
-    return feed_urls
+    with Path.open(file_path) as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 
 def create_state_table() -> None:
@@ -302,7 +302,7 @@ def check_feeds() -> None:
             continue
 
 
-def job():
+def job() -> None:
     try:
         check_feeds()
     except Exception as e:
@@ -310,12 +310,12 @@ def job():
         sentry_sdk.capture_exception(e)
 
 
-def sentry_listener(event):
+def sentry_listener(event: JobExecutionEvent) -> None:
     if event.exception:
         sentry_sdk.capture_exception(event.exception)
 
 
-def main(run_once: bool = False) -> None:
+def main(*, run_once: bool = False) -> None:
     logger.info("Starting meed...")
     create_state_table()
 
@@ -331,7 +331,7 @@ def main(run_once: bool = False) -> None:
     scheduler.add_listener(sentry_listener, mask=EVENT_JOB_ERROR)
     scheduler.add_job(job, CronTrigger.from_crontab(CRON_SCHEDULE))
 
-    def signal_handler_scheduler(signum: int, _: Any) -> None:
+    def signal_handler_scheduler(_: int, __: FrameType | None) -> None:
         scheduler.shutdown()
 
     for s in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM]:
