@@ -17,7 +17,11 @@ dependencies = [
 [dependency-groups]
 dev = [
     "ipython>=9.5.0",
-    "ruff>=0.13.1",
+    "ruff>=0.14.1",
+    "mypy>=1.18.2",
+    "types-python-dateutil>=2.9.0.20251008",
+    "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.ruff]
@@ -25,3 +29,43 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["ALL"]
+ignore = [
+    "BLE001",   # catch Exception
+    "C901",     # function is too complex
+    "COM812",   # missing-trailing-comma
+    "D",        # pydocstyle
+    "EM101",    # exception with string literal
+    "FIX002",   # TODO
+    "G004",     # logging f-string
+    "ISC001",   # single-line-implicit-string-concatenation
+    "PLC0415",  # import should be at top-level
+    "PLR2004",  # magic value used in comparison
+    "S101",     # use of assert (fine in tests)
+    "SIM108",   # ternary operator
+    "T201",     # print found (appropriate for CLI commands)
+    "TD",       # TODO
+    "TRY003",   # long messages outside the exception class
+    "TRY300",   # consider moving statement to else block
+    "TRY400",   # logging.error
+]
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.mypy]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unreachable = true
+show_column_numbers = true
+
+[[tool.mypy.overrides]]
+module = [
+    "feedparser",
+    "apscheduler.*",
+    "json_log_formatter",
+]
+ignore_missing_imports = true
