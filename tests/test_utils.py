@@ -2,13 +2,14 @@
 # ABOUTME: and providing assertion helpers for meed testing
 
 import sqlite3
+from email import message_from_string
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 
 def create_feed_entry(
-    entry_id: str,
+    entry_id: str | None,
     title: str | None = None,
     summary: str | None = None,
     link: str | None = None,
@@ -182,8 +183,6 @@ def assert_no_emails_sent(mock_smtp: MagicMock) -> None:
 
 def get_email_count(mock_smtp: MagicMock) -> int:
     """Get the number of emails sent."""
-    if not mock_smtp.called:
-        return 0
     sendmail_mock = mock_smtp.return_value.__enter__.return_value.sendmail
     return int(sendmail_mock.call_count)
 
@@ -203,3 +202,12 @@ def assert_feed_state(db_path: Path, feed_id: str, last_entry_id: str) -> None:
     rows = query_db(db_path, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_id,))
     assert len(rows) > 0, f"Feed {feed_id} not found in database"
     assert rows[0][0] == last_entry_id, f"Expected last_entry_id={last_entry_id}, got {rows[0][0]}"
+
+
+def get_email_body(email_str: str) -> str:
+    """Extract and decode the body from an email string."""
+    msg = message_from_string(email_str)
+    payload = msg.get_payload(decode=True)
+    if payload and isinstance(payload, bytes):
+        return payload.decode("utf-8")
+    return ""
