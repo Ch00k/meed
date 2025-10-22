@@ -1055,3 +1055,322 @@ def test_feed_title_in_email_from_header(test_env: Path, mock_smtp: MagicMock) -
     # Feed title in From header
     assert feed_title in email_str
     assert "From:" in email_str
+
+
+def test_feed_entry_no_id_uses_title(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Test that feed entry with no ID or link but with title uses title as ID."""
+    from meed import main
+
+    entries = [
+        create_feed_entry(
+            None,  # No ID
+            "Entry Title",
+            "Summary",
+            None,  # No link
+            "Mon, 01 Jan 2025 10:00:00 GMT",
+        )
+    ]
+    feed_xml = create_rss_feed(entries)
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(feed_xml)
+
+    feed_url = f"file://{feed_file}"
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # First run - creates state
+    main(run_once=True)
+    assert_no_emails_sent(mock_smtp)
+
+    # Update feed with new entry
+    new_entries = [
+        *entries,
+        create_feed_entry(
+            None,
+            "New Entry",
+            "New Summary",
+            None,
+            "Mon, 01 Jan 2025 11:00:00 GMT",
+        ),
+    ]
+    feed_xml = create_rss_feed(new_entries)
+    feed_file.write_text(feed_xml)
+
+    # Second run - should send email
+    main(run_once=True)
+    assert get_email_count(mock_smtp) == 1
+
+
+def test_feed_entry_no_link(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Test that feed entry with no link uses ID as link."""
+    from meed import main
+
+    entries = [
+        create_feed_entry(
+            "http://example.com/entry-1",
+            "Entry Title",
+            "Summary",
+            None,  # No link
+            "Mon, 01 Jan 2025 10:00:00 GMT",
+        )
+    ]
+    feed_xml = create_rss_feed(entries)
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(feed_xml)
+
+    feed_url = f"file://{feed_file}"
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # First run
+    main(run_once=True)
+    assert_no_emails_sent(mock_smtp)
+
+    # Add new entry and verify link handling
+    new_entries = [
+        *entries,
+        create_feed_entry(
+            "http://example.com/entry-2",
+            "New Entry",
+            "New Summary",
+            None,
+            "Mon, 01 Jan 2025 11:00:00 GMT",
+        ),
+    ]
+    feed_xml = create_rss_feed(new_entries)
+    feed_file.write_text(feed_xml)
+
+    main(run_once=True)
+    assert get_email_count(mock_smtp) == 1
+
+
+def test_feeds_file_does_not_exist(mock_smtp: MagicMock) -> None:
+    """Test handling when feeds file does not exist."""
+    from meed import main
+
+    # Delete the feeds file
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    feeds_file.unlink()
+
+    # Should not crash
+    main(run_once=True)
+    assert_no_emails_sent(mock_smtp)
+
+
+def test_feed_no_metadata(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Test handling of malformed feed with no metadata."""
+    from meed import Feed, main
+
+    # Create a minimal/broken XML that feedparser will parse but has no feed metadata
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text('<?xml version="1.0"?><root></root>')
+
+    feed_url = f"file://{feed_file}"
+
+    # Parse directly to ensure we hit the no-feed-metadata path
+    feed = Feed.from_url(feed_url)
+    assert feed.metadata.id == feed_url
+    assert feed.metadata.title == feed_url
+
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # Should not crash
+    main(run_once=True)
+    assert_no_emails_sent(mock_smtp)
+
+
+def test_feed_get_new_entries_with_no_last_id(test_env: Path) -> None:
+    """Test that get_new_entries returns all entries when last_id is None."""
+    from meed import Feed
+
+    entries = [
+        create_feed_entry(
+            "http://example.com/entry-1",
+            "Entry 1",
+            "Summary 1",
+            "http://example.com/1",
+            "Mon, 01 Jan 2025 10:00:00 GMT",
+        ),
+        create_feed_entry(
+            "http://example.com/entry-2",
+            "Entry 2",
+            "Summary 2",
+            "http://example.com/2",
+            "Mon, 01 Jan 2025 11:00:00 GMT",
+        ),
+    ]
+    feed_xml = create_rss_feed(entries)
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(feed_xml)
+
+    feed_url = f"file://{feed_file}"
+    feed = Feed.from_url(feed_url)
+
+    # When last_id is None, should return all entries
+    new_entries = feed.get_new_entries(None)
+    assert len(new_entries) == 2
+
+
+def test_feed_create_state_already_known(test_env: Path) -> None:
+    """Test that create_state does nothing if feed is already known."""
+    from meed import main
+
+    entries = [
+        create_feed_entry(
+            "http://example.com/entry-1",
+            "Entry 1",
+            "Summary 1",
+            "http://example.com/1",
+            "Mon, 01 Jan 2025 10:00:00 GMT",
+        )
+    ]
+    feed_xml = create_rss_feed(entries)
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(feed_xml)
+
+    feed_url = f"file://{feed_file}"
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # First run creates state
+    main(run_once=True)
+
+    # Get the feed and try to create state again
+    from meed import Feed
+
+    feed = Feed.from_url(feed_url)
+    assert feed.is_known()
+
+    # This should be a no-op
+    feed.create_state()
+
+    # State should still be the same
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    rows = query_db(state_db, "SELECT COUNT(*) FROM feeds WHERE id = ?", (feed_url,))
+    assert rows[0][0] == 1  # Only one entry
+
+
+def test_job_function_exception_handling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that job() function handles exceptions properly."""
+    from meed import job
+
+    # Mock check_feeds to raise an exception
+    def mock_check_feeds() -> None:
+        raise ValueError("Test exception")
+
+    monkeypatch.setattr("meed.check_feeds", mock_check_feeds)
+
+    # Should not crash, exception should be caught
+    job()
+
+
+def test_logging_json_formatter_with_extra() -> None:
+    """Test MeedJSONFormatter with extra attributes."""
+    import logging
+
+    from meed import MeedJSONFormatter
+
+    formatter = MeedJSONFormatter()
+
+    # Create a log record with extra attributes
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="test.py",
+        lineno=1,
+        msg="Test message",
+        args=(),
+        exc_info=None,
+    )
+    record.taskName = "test_task"
+    record.custom_field = "custom_value"
+
+    # Format the record
+    formatted = formatter.format(record)
+
+    # Should contain the custom field
+    assert "custom_field" in formatted
+    assert "custom_value" in formatted
+    assert "test_task" in formatted
+
+
+def test_logging_json_formatter_with_exception() -> None:
+    """Test MeedJSONFormatter with exception info."""
+    import logging
+    import sys
+
+    from meed import MeedJSONFormatter
+
+    formatter = MeedJSONFormatter()
+
+    def raise_test_error() -> None:
+        raise ValueError("Test exception")
+
+    try:
+        raise_test_error()
+    except ValueError:
+        exc_info = sys.exc_info()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="test.py",
+            lineno=1,
+            msg="Error occurred",
+            args=(),
+            exc_info=exc_info,
+        )
+        record.taskName = "test_task"
+
+        # Format the record
+        formatted = formatter.format(record)
+
+        # Should contain stack trace
+        assert "stack_trace" in formatted
+        assert "ValueError" in formatted
+        assert "Test exception" in formatted
+
+
+def test_sentry_listener() -> None:
+    """Test sentry_listener function."""
+    from unittest.mock import Mock
+
+    from meed import sentry_listener
+
+    # Create a mock event with an exception
+    event = Mock()
+    event.exception = ValueError("Test exception")
+
+    # This should not crash
+    sentry_listener(event)
+
+    # Test with no exception
+    event.exception = None
+    sentry_listener(event)
+
+
+def test_feed_entry_no_id_no_link_no_title_raises_error(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Test that feed entry with no ID, link, or title raises InvalidFeedEntryError."""
+    from meed import main
+
+    # Create entry with no ID, no link, and no title
+    entries = [
+        create_feed_entry(
+            None,  # No ID
+            None,  # No title
+            "Summary",
+            None,  # No link
+            "Mon, 01 Jan 2025 10:00:00 GMT",
+        )
+    ]
+    feed_xml = create_rss_feed(entries)
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(feed_xml)
+
+    feed_url = f"file://{feed_file}"
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # Should not crash, invalid entry should be filtered out
+    main(run_once=True)
+    assert_no_emails_sent(mock_smtp)
