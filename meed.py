@@ -58,7 +58,7 @@ FEEDS_FILE_PATH = env.path("MEED_FEEDS_FILE_PATH", Path("feeds.txt"))
 STATE_DB_PATH = env.path("MEED_STATE_DB_PATH", Path("state.db"))
 
 SMTP_HOST = env.str("MEED_SMTP_HOST", "127.0.0.1")
-SMTP_PORT = env.int("MEED_SMTP_PORT", 25)
+SMTP_PORT = env.int("MEED_SMTP_PORT", 465)
 SMTP_USER = env.str("MEED_SMTP_USER", "user")
 SMTP_PASSWORD = env.str("MEED_SMTP_PASSWORD", "password")
 

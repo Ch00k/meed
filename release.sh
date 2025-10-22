@@ -49,8 +49,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     git push origin "$NEW_VERSION"
 
     echo "Release $NEW_VERSION created successfully!"
-    echo "Binary build will start automatically via GitHub Actions."
-    echo "Monitor at https://github.com/Ch00k/claude-journal/actions"
+    echo "Monitor at https://github.com/Ch00k/meed/actions"
 else
     echo "Release cancelled"
     echo "Reverting version bump..."

@@ -8,7 +8,7 @@ services:
       MEED_FEEDS_FILE_PATH: /data/feeds.txt
       MEED_STATE_DB_PATH: /data/state.db
       MEED_SMTP_HOST: ${MEED_SMTP_HOST:-127.0.0.1}
-      MEED_SMTP_PORT: ${MEED_SMTP_PORT:-25}
+      MEED_SMTP_PORT: ${MEED_SMTP_PORT:-465}
       MEED_SMTP_USER: ${MEED_SMTP_USER:-user}
       MEED_SMTP_PASSWORD: ${MEED_SMTP_PASSWORD:-password}
       MEED_EMAIL_FROM: ${MEED_EMAIL_FROM:-meed@example.com}

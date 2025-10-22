@@ -46,7 +46,7 @@ For easier deployment with automatic updates, consider using [oar](https://githu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEED_SMTP_HOST` | `127.0.0.1` | SMTP server hostname |
-| `MEED_SMTP_PORT` | `25` | SMTP server port |
+| `MEED_SMTP_PORT` | `465` | SMTP server port |
 | `MEED_SMTP_USER` | `user` | SMTP authentication username |
 | `MEED_SMTP_PASSWORD` | `password` | SMTP authentication password |
 | `MEED_EMAIL_FROM` | `meed@example.com` | Sender email address |
