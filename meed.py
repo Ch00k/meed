@@ -54,16 +54,16 @@ class InvalidFeedEntryError(Exception):
 
 env = environs.Env()
 
-FEEDS_FILE_PATH = env.path("MEED_FEEDS_FILE_PATH")
-STATE_DB_PATH = env.path("MEED_STATE_DB_PATH")
+FEEDS_FILE_PATH = env.path("MEED_FEEDS_FILE_PATH", Path("feeds.txt"))
+STATE_DB_PATH = env.path("MEED_STATE_DB_PATH", Path("state.db"))
 
-SMTP_HOST = env.str("MEED_SMTP_HOST")
-SMTP_PORT = env.int("MEED_SMTP_PORT")
-SMTP_USER = env.str("MEED_SMTP_USER")
-SMTP_PASSWORD = env.str("MEED_SMTP_PASSWORD")
+SMTP_HOST = env.str("MEED_SMTP_HOST", "127.0.0.1")
+SMTP_PORT = env.int("MEED_SMTP_PORT", 25)
+SMTP_USER = env.str("MEED_SMTP_USER", "user")
+SMTP_PASSWORD = env.str("MEED_SMTP_PASSWORD", "password")
 
-EMAIL_FROM = env.str("MEED_EMAIL_FROM")
-EMAIL_TO = env.str("MEED_EMAIL_TO")
+EMAIL_FROM = env.str("MEED_EMAIL_FROM", "meed@example.com")
+EMAIL_TO = env.str("MEED_EMAIL_TO", "my@e.mail")
 
 CRON_SCHEDULE = env.str("MEED_CRON_SCHEDULE", "0 */4 * * *")
 

@@ -7,15 +7,16 @@ services:
     environment:
       MEED_FEEDS_FILE_PATH: /data/feeds.txt
       MEED_STATE_DB_PATH: /data/state.db
-      MEED_SMTP_HOST: ${MEED_SMTP_HOST}
-      MEED_SMTP_PORT: ${MEED_SMTP_PORT}
-      MEED_SMTP_USER: ${MEED_SMTP_USER}
-      MEED_SMTP_PASSWORD: ${MEED_SMTP_PASSWORD}
-      MEED_EMAIL_FROM: ${MEED_EMAIL_FROM}
-      MEED_EMAIL_TO: ${MEED_EMAIL_TO}
+      MEED_SMTP_HOST: ${MEED_SMTP_HOST:-127.0.0.1}
+      MEED_SMTP_PORT: ${MEED_SMTP_PORT:-25}
+      MEED_SMTP_USER: ${MEED_SMTP_USER:-user}
+      MEED_SMTP_PASSWORD: ${MEED_SMTP_PASSWORD:-password}
+      MEED_EMAIL_FROM: ${MEED_EMAIL_FROM:-meed@example.com}
+      MEED_EMAIL_TO: ${MEED_EMAIL_TO:-my@e.mail}
       MEED_CRON_SCHEDULE: "${MEED_CRON_SCHEDULE:-0 */4 * * *}"
-      MEED_SENTRY_DSN: ${MEED_SENTRY_DSN}
-      TZ: Europe/Amsterdam
+      MEED_SENTRY_DSN: ${MEED_SENTRY_DSN:-}
+      TZ: ${MEED_TIMEZONE:-UTC}
+    restart: unless-stopped
     logging:
       driver: fluentd
       options:
@@ -24,4 +25,3 @@ services:
         labels: fluentbit-es-index
     labels:
       - fluentbit-es-index=fluentbit.meed.app
-    restart: unless-stopped
