@@ -17,11 +17,3 @@ services:
       MEED_SENTRY_DSN: ${MEED_SENTRY_DSN:-}
       TZ: ${MEED_TIMEZONE:-UTC}
     restart: unless-stopped
-    logging:
-      driver: fluentd
-      options:
-        fluentd-async: "true"
-        tag: docker-compose.meed.app
-        labels: fluentbit-es-index
-    labels:
-      - fluentbit-es-index=fluentbit.meed.app
