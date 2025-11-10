@@ -7,6 +7,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from email.mime.text import MIMEText
+from importlib.metadata import version
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -73,6 +74,18 @@ SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checke
 SQL_GET_STATE = "SELECT last_checked_at, last_entry_id FROM feeds WHERE id = ?"
 SQL_CREATE_STATE = "INSERT INTO feeds (id, last_checked_at, last_entry_id) VALUES (?, datetime('now'), ?)"
 SQL_UPDATE_STATE = "UPDATE feeds SET last_checked_at = datetime('now'), last_entry_id = ? WHERE id = ?"
+
+
+def _get_version() -> str:
+    """Get meed version from package metadata, or 'dev' if not installed."""
+    try:
+        return version("meed")
+    except Exception:
+        return "dev"
+
+
+# Custom User-Agent to identify meed and avoid overly aggressive bot detection
+USER_AGENT = f"meed/{_get_version()} (+https://github.com/Ch00k/meed)"
 
 
 @contextmanager
@@ -179,7 +192,7 @@ class Feed(BaseModel):
 
     @classmethod
     def from_url(cls, url: str) -> "Feed":
-        parsed_feed = feedparser.parse(url)
+        parsed_feed = feedparser.parse(url, agent=USER_AGENT)
 
         if "feed" in parsed_feed:
             logger.info(f"Replacing feed ID with URL for feed {url}")
@@ -317,6 +330,7 @@ def sentry_listener(event: JobExecutionEvent) -> None:
 
 def main(*, run_once: bool = False) -> None:
     logger.info("Starting meed...")
+    logger.info(f"Using User-Agent: {USER_AGENT}")
     create_state_table()
 
     if run_once:
