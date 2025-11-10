@@ -595,10 +595,10 @@ def test_network_error_simulation(test_env: Path, caplog: pytest.LogCaptureFixtu
 
     original_parse = feedparser.parse
 
-    def mock_parse(url: str) -> feedparser.FeedParserDict:
+    def mock_parse(url: str, **kwargs: object) -> feedparser.FeedParserDict:
         if "failing" in url:
             raise ConnectionError("Network error")
-        return original_parse(url)
+        return original_parse(url, **kwargs)
 
     with patch("feedparser.parse", side_effect=mock_parse):
         main(run_once=True)
@@ -1374,3 +1374,26 @@ def test_feed_entry_no_id_no_link_no_title_raises_error(test_env: Path, mock_smt
     # Should not crash, invalid entry should be filtered out
     main(run_once=True)
     assert_no_emails_sent(mock_smtp)
+
+
+def test_feedparser_uses_custom_user_agent() -> None:
+    """Test that feedparser is configured with a custom User-Agent to avoid bot detection."""
+    from unittest.mock import patch
+
+    from meed import Feed
+
+    with patch("feedparser.parse") as mock_parse:
+        mock_parse.return_value = {
+            "feed": {"id": "http://example.com", "title": "Test Feed"},
+            "entries": [],
+        }
+
+        Feed.from_url("http://example.com/feed")
+
+        # Verify feedparser.parse was called with a custom agent parameter
+        mock_parse.assert_called_once()
+        call_kwargs = mock_parse.call_args[1]
+        assert "agent" in call_kwargs
+        assert "meed" in call_kwargs["agent"]  # Should identify as meed
+        assert "github.com/Ch00k/meed" in call_kwargs["agent"]  # Should have project URL
+        assert "feedparser" not in call_kwargs["agent"].lower()  # Should not contain default feedparser UA
