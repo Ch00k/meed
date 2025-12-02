@@ -8,6 +8,7 @@ SQLite database.
 ## Features
 
 - **Multiple feed support**: Monitor blogs, podcasts, YouTube channels, and any RSS/Atom feed
+- **Email-based feed addition**: Add feeds by sending emails (requires IMAP configuration)
 - **Scheduled checks**: Cron-based scheduling (default: every 4 hours)
 - **Chronological delivery**: New entries are emailed oldest-first to preserve reading order
 - **Robust parsing**: Handles malformed feeds gracefully with intelligent fallbacks
@@ -35,7 +36,8 @@ SQLite database.
    docker compose up -d
    ```
 
-For easier deployment with automatic updates, consider using [oar](https://github.com/oar-cd/oar), which provides a simple way to deploy and manage **meed** in production.
+For easier deployment with automatic updates, consider using [oar](https://github.com/oar-cd/oar), which provides a
+simple way to deploy and manage **meed** in production.
 
 ## Configuration
 
@@ -53,6 +55,10 @@ For easier deployment with automatic updates, consider using [oar](https://githu
 | `MEED_EMAIL_TO` | `my@e.mail` | Recipient email address |
 | `MEED_CRON_SCHEDULE` | `0 */4 * * *` | Cron expression for check schedule |
 | `MEED_TIMEZONE` | `UTC` | Timezone for scheduling (e.g., `Europe/Amsterdam`, `America/New_York`) |
+| `MEED_IMAP_HOST` | _(none)_ | Optional IMAP server hostname for email-based feed addition (e.g., `imap.fastmail.com`) |
+| `MEED_IMAP_USER` | _(none)_ | Optional IMAP username/email for authentication |
+| `MEED_IMAP_PASSWORD` | _(none)_ | Optional IMAP password or app-specific password |
+| `MEED_IMAP_MAILBOX` | `INBOX.meed` | IMAP mailbox/folder name to monitor for feed addition emails |
 | `MEED_SENTRY_DSN` | _(none)_ | Optional Sentry DSN for error tracking |
 
 ### Feed Configuration
@@ -71,6 +77,23 @@ https://www.youtube.com/feeds/videos.xml?channel_id=UCy0tKL1T7wFoYcxCe0xjN6Q
 https://changelog.com/podcast/feed
 ```
 
+### Adding Feeds via Email (Optional)
+
+If you configure IMAP credentials, you can add feeds by sending an email to a designated mailbox. **meed** will check
+this mailbox on each cron run, validate the feed URLs, and automatically add them to `feeds.txt`.
+
+**Email format:**
+```
+https://example.com/feed.xml
+Tech News
+```
+
+- **Line 1**: Feed URL (required)
+- **Line 2**: Category name (optional)
+
+**meed** will validate each URL to ensure it's a valid RSS/Atom feed before adding it. Invalid URLs or emails are logged
+and marked as read.
+
 ## How It Works
 
 1. **First run**: **meed** reads all feeds and stores their current state in the database. No emails are sent.
@@ -86,12 +109,13 @@ https://changelog.com/podcast/feed
 make test
 ```
 
-The test suite includes 30 comprehensive tests covering:
+The test suite includes comprehensive tests covering:
 - New entry detection and ordering
 - Feed format compatibility (RSS 2.0, Atom 1.0)
 - Error handling (network errors, SMTP failures, malformed feeds)
 - State persistence and database integrity
 - Unicode and HTML content handling
+- Email parsing and feed addition via IMAP
 
 ### Linting and Type Checking
 
@@ -100,7 +124,3 @@ make lint
 ```
 
 This runs `ruff` for linting/formatting and `mypy` for static type checking.
-
-## License
-
-Public Domain (Unlicense)

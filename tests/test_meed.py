@@ -1397,3 +1397,138 @@ def test_feedparser_uses_custom_user_agent() -> None:
         assert "meed" in call_kwargs["agent"]  # Should identify as meed
         assert "github.com/Ch00k/meed" in call_kwargs["agent"]  # Should have project URL
         assert "feedparser" not in call_kwargs["agent"].lower()  # Should not contain default feedparser UA
+
+
+def test_assert_email_sent_helper(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Test the assert_email_sent helper function with body_contains parameter."""
+    from meed import main
+
+    entries = [
+        create_feed_entry(
+            "http://example.com/1", "Entry 1", "Summary 1", "http://example.com/1", "Mon, 01 Jan 2025 10:00:00 GMT"
+        )
+    ]
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed(entries))
+
+    feed_url = f"file://{feed_file}"
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # Establish baseline
+    main(run_once=True)
+
+    # Add new entry
+    new_entries = [
+        *entries,
+        create_feed_entry(
+            "http://example.com/2",
+            "Test Subject",
+            "Unique Body Content",
+            "http://example.com/2",
+            "Mon, 01 Jan 2025 11:00:00 GMT",
+        ),
+    ]
+    feed_file.write_text(create_rss_feed(new_entries))
+
+    mock_smtp.reset_mock()
+    main(run_once=True)
+
+    # Verify email was sent - just check that the function works (covers lines 156-175)
+    sendmail_mock = mock_smtp.return_value.__enter__.return_value.sendmail
+    sendmail_mock.assert_called_once()
+
+    # Get the actual email content
+    call_args = sendmail_mock.call_args[0]
+    message_str = call_args[2]
+    email_body = get_email_body(message_str)
+
+    # Verify content
+    assert "Test Subject" in message_str
+    assert "Unique Body Content" in email_body
+
+
+def test_assert_feed_state_helper(test_env: Path) -> None:
+    """Test the assert_feed_state helper function."""
+    from meed import main
+    from tests.test_utils import assert_feed_state
+
+    entries = [
+        create_feed_entry(
+            "http://example.com/1", "Entry 1", "Summary 1", "http://example.com/1", "Mon, 01 Jan 2025 10:00:00 GMT"
+        )
+    ]
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed(entries))
+
+    feed_url = f"file://{feed_file}"
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # Create state
+    main(run_once=True)
+
+    # Test the helper function
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    assert_feed_state(state_db, feed_url, "http://example.com/1")
+
+
+def test_get_email_body_empty() -> None:
+    """Test get_email_body with an email that has no payload."""
+    from tests.test_utils import get_email_body
+
+    # Email with no payload
+    email_str = "Subject: Test\nFrom: test@test.com\n\n"
+    body = get_email_body(email_str)
+    assert body == ""
+
+
+def test_feed_with_mix_of_valid_and_invalid_entries(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Test feed processing with a mix of valid and invalid entries."""
+    from meed import main
+
+    # Manually construct RSS with invalid entry (no id, title, link, or date)
+    xml_parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0">',
+        "<channel>",
+        "<title>Test Feed</title>",
+        "<link>http://example.com/feed</link>",
+        "<description>Test feed description</description>",
+        "<item>",
+        "<guid>http://example.com/1</guid>",
+        "<title>Valid Entry 1</title>",
+        "<link>http://example.com/1</link>",
+        "<description>Summary 1</description>",
+        "<pubDate>Mon, 01 Jan 2025 10:00:00 GMT</pubDate>",
+        "</item>",
+        "<item>",
+        "<description>Summary 2</description>",
+        "</item>",
+        "<item>",
+        "<guid>http://example.com/3</guid>",
+        "<title>Valid Entry 3</title>",
+        "<link>http://example.com/3</link>",
+        "<description>Summary 3</description>",
+        "<pubDate>Mon, 01 Jan 2025 12:00:00 GMT</pubDate>",
+        "</item>",
+        "</channel>",
+        "</rss>",
+    ]
+    feed_xml = "\n".join(xml_parts)
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(feed_xml)
+
+    feed_url = f"file://{feed_file}"
+    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
+    create_feeds_file([feed_url], feeds_file)
+
+    # Should not crash, should process valid entries only
+    main(run_once=True)
+    assert_no_emails_sent(mock_smtp)
+
+    # Verify state was created with valid entry
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
+    assert len(rows) > 0

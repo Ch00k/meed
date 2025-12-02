@@ -1,6 +1,3 @@
-# ABOUTME: Test utilities for generating RSS/Atom feeds, setting up test environments,
-# ABOUTME: and providing assertion helpers for meed testing
-
 import sqlite3
 from email import message_from_string
 from pathlib import Path

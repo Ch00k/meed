@@ -8,6 +8,7 @@ dependencies = [
     "apscheduler>=3.11.0",
     "environs>=14.3.0",
     "feedparser>=6.0.12",
+    "imap-tools>=1.11.0",
     "json-log-formatter>=1.1.1",
     "pydantic>=2.11.9",
     "python-dateutil>=2.9.0.post0",
@@ -67,6 +68,7 @@ show_column_numbers = true
 module = [
     "feedparser",
     "apscheduler.*",
+    "imap_tools",
     "json_log_formatter",
 ]
 ignore_missing_imports = true
