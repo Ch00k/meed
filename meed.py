@@ -19,6 +19,8 @@ from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dateutil import parser as date_parser
+from imap_tools import MailBox, MailMessageFlags
+from imap_tools.message import MailMessage
 from json_log_formatter import BUILTIN_ATTRS, JSONFormatter
 from pydantic import BaseModel, Field, model_validator
 
@@ -67,6 +69,12 @@ EMAIL_FROM = env.str("MEED_EMAIL_FROM", "meed@example.com")
 EMAIL_TO = env.str("MEED_EMAIL_TO", "my@e.mail")
 
 CRON_SCHEDULE = env.str("MEED_CRON_SCHEDULE", "0 */4 * * *")
+
+IMAP_HOST = env.str("MEED_IMAP_HOST", None)
+IMAP_PORT = env.int("MEED_IMAP_PORT", 993)
+IMAP_USER = env.str("MEED_IMAP_USER", None)
+IMAP_PASSWORD = env.str("MEED_IMAP_PASSWORD", None)
+IMAP_MAILBOX = env.str("MEED_IMAP_MAILBOX", "INBOX.meed")
 
 SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 
@@ -288,6 +296,134 @@ def read_feeds_file(file_path: Path) -> list:
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 
+def parse_email_body(body: str) -> tuple[str | None, str | None]:
+    """Parse email body to extract URL and optional category.
+
+    Expected format:
+    Line 1: URL
+    Line 2 (optional): Category
+
+    Returns tuple of (url, category) or (None, None) if parsing fails.
+    """
+    lines = [line.strip() for line in body.strip().split("\n") if line.strip()]
+
+    if not lines:
+        return None, None
+
+    url = lines[0]
+    category = lines[1] if len(lines) > 1 else None
+
+    return url, category
+
+
+def is_valid_feed(url: str) -> bool:
+    """Check if a URL is a valid RSS/Atom feed."""
+    try:
+        feedparser.parse(url, agent=USER_AGENT)
+    except Exception as e:
+        logger.error(f"Error validating feed {url}: {e}")
+        return False
+    else:
+        return True
+
+
+def add_feed_to_file(file_path: Path, url: str, category: str | None = None) -> None:
+    """Append a feed URL to the feeds file, with optional category comment.
+
+    If category is provided and already exists in the file, the URL is added after
+    the last URL in that category. If the category doesn't exist, a new category
+    section is created. If no category is provided, the URL is added to "uncategorized".
+    """
+    # Read existing file content
+    if not file_path.exists():
+        file_path.touch()
+
+    with Path.open(file_path) as f:
+        lines = f.readlines()
+
+    # Default to "uncategorized" if no category provided
+    if not category:
+        category = "uncategorized"
+
+    # Find if category already exists
+    category_comment = f"# {category}\n"
+    category_index = -1
+
+    for i, line in enumerate(lines):
+        if line == category_comment:
+            category_index = i
+            break
+
+    if category_index == -1:
+        # Category doesn't exist - add new section at end
+        with Path.open(file_path, "a") as f:
+            f.write(f"\n\n{category_comment}{url}\n")
+    else:
+        # Category exists - find where to insert (after last URL in this category)
+        insert_index = category_index + 1
+
+        # Find the next category comment or end of file
+        for i in range(category_index + 1, len(lines)):
+            if lines[i].startswith("#"):
+                insert_index = i
+                break
+            if lines[i].strip():  # Non-empty line
+                insert_index = i + 1
+
+        # Insert the URL
+        lines.insert(insert_index, f"{url}\n\n")
+
+        # Write back the entire file
+        with Path.open(file_path, "w") as f:
+            f.writelines(lines)
+
+
+def process_email(msg: MailMessage) -> None:
+    logger.info(f"Processing email {msg.uid}")
+
+    if msg.uid is None:
+        logger.warning("Email {msg} has no UID")
+
+    body_text = msg.text or msg.html
+    if not body_text:
+        logger.warning(f"Email {msg.uid} has no valid body")
+        return
+
+    url, category = parse_email_body(body_text)
+    if not url:
+        logger.warning(f"Email {msg.uid} has no valid URL")
+        return
+
+    if not is_valid_feed(url):
+        logger.warning(f"URL {url} is not a valid feed")
+        return
+
+    logger.info(f"Adding feed {url} with category '{category}' to feeds file")
+    add_feed_to_file(FEEDS_FILE_PATH, url, category)
+
+
+def check_emails() -> None:
+    """Check IMAP mailbox for new feed URLs and add them to feeds file."""
+    if not IMAP_HOST or not IMAP_USER or not IMAP_PASSWORD:
+        logger.warning("IMAP not configured, skipping email check")
+        return
+
+    with MailBox(host=IMAP_HOST, port=IMAP_PORT).login(IMAP_USER, IMAP_PASSWORD) as mailbox:
+        mailbox.folder.set(IMAP_MAILBOX)
+
+        messages = list(mailbox.fetch(criteria="UNSEEN"))
+        if not messages:
+            logger.debug("No unread emails found")
+            return
+
+        for msg in messages:
+            process_email(msg)
+
+        uids_to_mark_read = [msg.uid for msg in messages if msg.uid is not None]
+        mailbox.flag(uids_to_mark_read, [MailMessageFlags.SEEN], value=True)
+        logger.info(f"Marked {len(uids_to_mark_read)} emails as read")
+
+
 def create_state_table() -> None:
     with get_db_cursor() as cursor:
         cursor.execute(SQL_CREATE_STATE_TABLE)
@@ -317,9 +453,15 @@ def check_feeds() -> None:
 
 def job() -> None:
     try:
+        check_emails()
+    except Exception as e:
+        logger.error(f"Error checking IMAP emails: {e}")
+        sentry_sdk.capture_exception(e)
+
+    try:
         check_feeds()
     except Exception as e:
-        logger.error(f"Error in scheduled job: {e}")
+        logger.error(f"Error checking feeds: {e}")
         sentry_sdk.capture_exception(e)
 
 

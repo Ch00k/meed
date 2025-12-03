@@ -168,6 +168,15 @@ wheels = [
 ]
 
 [[package]]
+name = "imap-tools"
+version = "1.11.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/76/2d74bf4702d7d9fb2dd056e058929961a05389be47b990f3275e8596012e/imap_tools-1.11.0.tar.gz", hash = "sha256:77b055d301f24e668ff54ad50cc32a36d1579c6aa9b26e5fb6501fb622feb6ea", size = 46191, upload-time = "2025-06-30T05:47:21.111Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/8f/75524e1a040183cc437332e2de6e8f975c345fff8b5aaa35e0d20dec24f9/imap_tools-1.11.0-py3-none-any.whl", hash = "sha256:7c797b421fdf1b898b4ee0042fe02d10037d56f9acacca64086c2af36d830a24", size = 34855, upload-time = "2025-06-30T05:47:15.657Z" },
+]
+
+[[package]]
 name = "iniconfig"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -229,11 +238,14 @@ sdist = { url = "https://files.pythonhosted.org/packages/e8/ef/324f4a28ed0152a32
 
 [[package]]
 name = "marshmallow"
-version = "4.0.1"
+version = "3.26.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/cc/ff/8f092fe402ef12aa71b7f4ceba0c557ce4d5876a9cf421e01a67b7210560/marshmallow-4.0.1.tar.gz", hash = "sha256:e1d860bd262737cb2d34e1541b84cb52c32c72c9474e3fe6f30f137ef8b0d97f", size = 220453, upload-time = "2025-08-28T15:01:37.044Z" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ab/5e/5e53d26b42ab75491cda89b871dab9e97c840bf12c63ec58a1919710cd06/marshmallow-3.26.1.tar.gz", hash = "sha256:e6d8affb6cb61d39d26402096dc0aee12d5a26d490a121f118d2e81dc0719dc6", size = 221825, upload-time = "2025-02-03T15:32:25.093Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cc/18/297efc62b3539b9cd379fc49be3740a02e4c8a43e486f50322cfe0b9568a/marshmallow-4.0.1-py3-none-any.whl", hash = "sha256:72f14ef346f81269dbddee891bac547dda1501e9e08b6a809756ea3dbb7936a1", size = 48414, upload-time = "2025-08-28T15:01:35.221Z" },
+    { url = "https://files.pythonhosted.org/packages/34/75/51952c7b2d3873b44a0028b1bd26a25078c18f92f256608e8d1dc61b39fd/marshmallow-3.26.1-py3-none-any.whl", hash = "sha256:3350409f20a70a7e4e11a27661187b77cdcaeb20abca41c1454fe33636bea09c", size = 50878, upload-time = "2025-02-03T15:32:22.295Z" },
 ]
 
 [[package]]
@@ -256,6 +268,7 @@ dependencies = [
     { name = "apscheduler" },
     { name = "environs" },
     { name = "feedparser" },
+    { name = "imap-tools" },
     { name = "json-log-formatter" },
     { name = "pydantic" },
     { name = "python-dateutil" },
@@ -277,6 +290,7 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.11.0" },
     { name = "environs", specifier = ">=14.3.0" },
     { name = "feedparser", specifier = ">=6.0.12" },
+    { name = "imap-tools", specifier = ">=1.11.0" },
     { name = "json-log-formatter", specifier = ">=1.1.1" },
     { name = "pydantic", specifier = ">=2.11.9" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
