@@ -5,7 +5,7 @@ import sqlite3
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 from email.mime.text import MIMEText
 from importlib.metadata import version
 from pathlib import Path
@@ -38,7 +38,7 @@ class MeedJSONFormatter(JSONFormatter):
     def json_record(self, message: str, extra: dict, record: logging.LogRecord) -> dict:
         new_extra: dict[str, Any] = {}
 
-        new_extra["timestamp"] = datetime.fromtimestamp(record.created, tz=UTC).isoformat(timespec="microseconds") + "Z"
+        new_extra["timestamp"] = datetime.fromtimestamp(record.created).isoformat(timespec="microseconds") + "Z"  # noqa: DTZ006
         new_extra["level"] = record.levelname
         new_extra["logger"] = record.name
         new_extra["module"] = record.module
