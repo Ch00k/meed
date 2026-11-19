@@ -1,0 +1,5 @@
+# Only what meed runs from goes into the image.
+*
+!meed.py
+!pyproject.toml
+!uv.lock

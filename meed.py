@@ -2,23 +2,27 @@ import logging
 import smtplib
 import socket
 import sqlite3
+import tomllib
 import urllib.error
-from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from email.mime.text import MIMEText
-from importlib.metadata import version
+from email.utils import formataddr
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import environs
 import feedparser
 import sentry_sdk
-from dateutil import parser as date_parser
-from imap_tools import MailBox, MailMessageFlags
-from imap_tools.message import MailMessage
+from imap_tools import MailBox
 from json_log_formatter import BUILTIN_ATTRS, JSONFormatter
 from pydantic import BaseModel, Field, model_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from imap_tools.message import MailMessage
 
 BUILTIN_ATTRS.add("taskName")
 
@@ -34,7 +38,8 @@ class MeedJSONFormatter(JSONFormatter):
     def json_record(self, message: str, extra: dict, record: logging.LogRecord) -> dict:
         new_extra: dict[str, Any] = {}
 
-        new_extra["timestamp"] = datetime.fromtimestamp(record.created).isoformat(timespec="microseconds") + "Z"  # noqa: DTZ006
+        timestamp = datetime.fromtimestamp(record.created, UTC).isoformat(timespec="microseconds")
+        new_extra["timestamp"] = timestamp.replace("+00:00", "Z")
         new_extra["level"] = record.levelname
         new_extra["logger"] = record.name
         new_extra["module"] = record.module
@@ -49,6 +54,10 @@ class MeedJSONFormatter(JSONFormatter):
 
 class InvalidFeedEntryError(Exception):
     """Raised when a feed entry cannot be parsed due to missing required fields."""
+
+
+class FeedFetchError(Exception):
+    """Raised when a feed's server answers with an HTTP error, or with something that is not a feed."""
 
 
 env = environs.Env()
@@ -77,25 +86,20 @@ SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 NETWORK_TIMEOUT = 60
 
 SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
-SQL_GET_STATE = "SELECT last_checked_at, last_entry_id FROM feeds WHERE id = ?"
+SQL_GET_STATE = "SELECT last_entry_id FROM feeds WHERE id = ?"
 SQL_CREATE_STATE = "INSERT INTO feeds (id, last_checked_at, last_entry_id) VALUES (?, datetime('now'), ?)"
 SQL_UPDATE_STATE = "UPDATE feeds SET last_checked_at = datetime('now'), last_entry_id = ? WHERE id = ?"
 
 
-def _get_version() -> str:
-    """Get meed version from package metadata, or 'dev' if not installed."""
-    try:
-        return version("meed")
-    except Exception:
-        return "dev"
-
+# meed is not installed as a package, so there is no package metadata to read its version from.
+VERSION = tomllib.loads(Path(__file__).with_name("pyproject.toml").read_text())["project"]["version"]
 
 # Custom User-Agent to identify meed and avoid overly aggressive bot detection
-USER_AGENT = f"meed/{_get_version()} (+https://github.com/Ch00k/meed)"
+USER_AGENT = f"meed/{VERSION} (+https://github.com/Ch00k/meed)"
 
 
 @contextmanager
-def get_db_cursor() -> Generator[sqlite3.Cursor, None, None]:
+def get_db_cursor() -> Generator[sqlite3.Cursor]:
     conn = sqlite3.connect(STATE_DB_PATH)
     cursor = conn.cursor()
     try:
@@ -142,22 +146,22 @@ class FeedEntry(BaseModel):
             logger.warning(f"FeedEntry {value['id']} has no summary, using ID as summary")
             value["summary"] = value["id"]
 
-        # Determine published date
-        published_date = value.get("published") or value.get("updated") or value.get("created")
+        # Determine published date. feedparser parses each date it can read into a UTC time.struct_time.
+        published_date = value.get("published_parsed") or value.get("updated_parsed") or value.get("created_parsed")
         if not published_date:
             logger.warning(f"FeedEntry {value['id']} has no published date, skipping entry")
             raise InvalidFeedEntryError("FeedEntry must have a published, updated, or created date")
 
-        # Parse published date
-        value["published"] = date_parser.parse(published_date)
+        value["published"] = datetime(*published_date[:6], tzinfo=UTC)
 
         return value
 
     def send_notification(self, feed_title: str) -> None:
+        # A header cannot hold a line break, and feeds do put them in titles.
         msg = MIMEText(f"{self.link}<br><br>{self.summary}", "html", "utf-8")
-        msg["From"] = f'"{feed_title}" <{EMAIL_FROM}>'
+        msg["From"] = formataddr((" ".join(feed_title.split()), EMAIL_FROM))
         msg["To"] = EMAIL_TO
-        msg["Subject"] = self.title
+        msg["Subject"] = " ".join(self.title.split())
 
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
             server.login(SMTP_USER, SMTP_PASSWORD)
@@ -190,38 +194,26 @@ class Feed(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def sort_entries(self) -> "Feed":
+    def sort_entries(self) -> Feed:
         if self.entries:
             # Sort entries by published date, newest first
             self.entries.sort(key=lambda e: e.published, reverse=True)
         return self
 
     @classmethod
-    def from_url(cls, url: str) -> "Feed":
-        parsed_feed = feedparser.parse(url, agent=USER_AGENT)
+    def from_url(cls, url: str) -> Feed:
+        parsed_feed = fetch_feed(url)
 
-        # feedparser reports a failed fetch as an empty feed. Taken as one, a new feed would get state with no last
-        # entry, and its first successful fetch would email the whole backlog.
-        if isinstance(parsed_feed.get("bozo_exception"), urllib.error.URLError):
-            raise parsed_feed["bozo_exception"]
+        logger.info(f"Replacing feed ID with URL for feed {url}")
+        parsed_feed["feed"]["id"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
 
-        if "feed" in parsed_feed:
-            logger.info(f"Replacing feed ID with URL for feed {url}")
-            parsed_feed["feed"]["id"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
-
-            if not parsed_feed["feed"].get("title"):  # pyright: ignore[reportAttributeAccessIssue]
-                logger.warning(f"Feed {url} has no title, using URL as title")
-                parsed_feed["feed"]["title"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
-        else:
-            logger.warning(f"Feed {url} has no feed metadata, using URL as ID and title")
-            parsed_feed["feed"] = {"id": url, "title": url}
+        if not parsed_feed["feed"].get("title"):  # pyright: ignore[reportAttributeAccessIssue]
+            logger.warning(f"Feed {url} has no title, using URL as title")
+            parsed_feed["feed"]["title"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
 
         return cls(**parsed_feed)  # pyright: ignore[reportArgumentType]
 
     def get_new_entries(self, last_id: str | None) -> list[FeedEntry]:
-        if not last_id:
-            return self.entries
-
         new_entries = []
         for entry in self.entries:
             if entry.id == last_id:
@@ -229,8 +221,9 @@ class Feed(BaseModel):
 
             new_entries.append(entry)
 
-        # Sort new entries by published date, oldest first
-        return sorted(new_entries, key=lambda e: e.published)
+        # Oldest first: the exact reverse of the order the last entry ID is looked up in, so that entries with the
+        # same date are never sent twice or skipped.
+        return new_entries[::-1]
 
     def process(self) -> None:
         if not self.is_known():
@@ -240,7 +233,7 @@ class Feed(BaseModel):
 
         logger.info(f"Feed {self.metadata.title} is known, checking for new entries")
 
-        _, last_entry_id = self.get_state()
+        last_entry_id = self.get_last_entry_id()
         logger.info(f"Last known entry ID: {last_entry_id}")
 
         new_entries = self.get_new_entries(last_entry_id)
@@ -250,53 +243,76 @@ class Feed(BaseModel):
         else:
             logger.info("No new entries found")
 
+        # The state moves past each entry as soon as its email is sent, so a run that fails partway resends nothing.
         for entry in new_entries:
-            title = entry.title
-            logger.info(f"Sending notification for entry {title} ({entry.link})")
+            logger.info(f"Sending notification for entry {entry.title} ({entry.link})")
             entry.send_notification(self.metadata.title)
+            self.update_state(entry.id)
 
-        if new_entries:
-            logger.info(f"Updating state for feed {self.metadata.title}")
-            self.update_state()
-
-    def is_known(self) -> bool:
-        return self.get_state() != (None, None)
-
-    def get_state(self) -> tuple[datetime | None, str | None]:
+    def get_state(self) -> tuple[str | None] | None:
+        """The feed's stored row, holding its last entry ID, or None for a feed with no state yet."""
         with get_db_cursor() as cursor:
             logger.debug("Executing SQL: %s with params (%s)", SQL_GET_STATE, self.metadata.id)
             cursor.execute(SQL_GET_STATE, (self.metadata.id,))
             row = cursor.fetchone()
 
-        result = (datetime.fromisoformat(row[0]), row[1]) if row else (None, None)
-        logger.debug("Fetched state from DB: %s", result)
+        logger.debug("Fetched state from DB: %s", row)
+        return row
 
-        return result
+    def is_known(self) -> bool:
+        return self.get_state() is not None
+
+    def get_last_entry_id(self) -> str | None:
+        row = self.get_state()
+        return row[0] if row else None
 
     def create_state(self) -> None:
-        if self.is_known():
-            return
-
         last_entry = self.entries[0].id if self.entries else None
         with get_db_cursor() as cursor:
             logger.debug("Executing SQL: %s with params (%s, %s)", SQL_CREATE_STATE, self.metadata.id, last_entry)
             cursor.execute(SQL_CREATE_STATE, (self.metadata.id, last_entry))
 
-    def update_state(self) -> None:
-        last_entry = self.entries[0].id if self.entries else None
-
+    def update_state(self, last_entry: str) -> None:
         with get_db_cursor() as cursor:
             logger.debug("Executing SQL: %s with params (%s, %s)", SQL_UPDATE_STATE, last_entry, self.metadata.id)
             cursor.execute(SQL_UPDATE_STATE, (last_entry, self.metadata.id))
 
 
-def read_feeds_file(file_path: Path) -> list:
+def read_feeds_file(file_path: Path) -> list[str]:
     if not file_path.exists():
         logger.warning(f"Feeds file {file_path} does not exist.")
         return []
 
     with Path.open(file_path) as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        lines = [line.strip() for line in f]
+
+    return [line for line in lines if line and not line.startswith("#")]
+
+
+def fetch_feed(url: str) -> feedparser.FeedParserDict:
+    """Fetch and parse an RSS or Atom feed, raising when the fetch fails or what it fetched is not a feed.
+
+    feedparser itself reports a failed fetch, or an error page, as an empty feed. Taken as one, a new feed would get
+    state with no last entry, and its first successful fetch would email the whole backlog.
+    """
+    parsed_feed = feedparser.parse(url, agent=USER_AGENT)
+
+    if isinstance(parsed_feed.get("bozo_exception"), urllib.error.URLError):
+        raise parsed_feed["bozo_exception"]
+
+    # feedparser parses the body of an error response too.
+    status = parsed_feed.get("status", 200)
+    if status >= 400:
+        msg = f"HTTP {status} from {url}"
+        raise FeedFetchError(msg)
+
+    # feedparser names the format of a feed it recognises, such as rss20 or atom10. After a redirect, `status` holds
+    # the redirect's code, so this is also what rejects an error page at the end of one.
+    if not parsed_feed.get("version", "").startswith(("rss", "atom")):
+        msg = f"{url} is not an RSS or Atom feed"
+        raise FeedFetchError(msg)
+
+    return parsed_feed
 
 
 def parse_email_body(body: str) -> tuple[str | None, str | None]:
@@ -320,14 +336,22 @@ def parse_email_body(body: str) -> tuple[str | None, str | None]:
 
 
 def is_valid_feed(url: str) -> bool:
-    """Check if a URL is a valid RSS/Atom feed."""
+    """Check that a URL serves an RSS or Atom feed over HTTP(S).
+
+    feedparser also reads a local path or a literal XML document, either of which an email could carry instead of a
+    URL.
+    """
     try:
-        feedparser.parse(url, agent=USER_AGENT)
+        if urlparse(url).scheme not in {"http", "https"}:
+            logger.warning(f"{url} is not an HTTP(S) URL")
+            return False
+
+        fetch_feed(url)
     except Exception as e:
         logger.error(f"Error validating feed {url}: {e}")
         return False
-    else:
-        return True
+
+    return True
 
 
 def add_feed_to_file(file_path: Path, url: str, category: str | None = None) -> None:
@@ -385,7 +409,7 @@ def process_email(msg: MailMessage) -> None:
     logger.info(f"Processing email {msg.uid}")
 
     if msg.uid is None:
-        logger.warning("Email {msg} has no UID")
+        logger.warning(f"Email {msg} has no UID")
 
     body_text = msg.text or msg.html
     if not body_text:
@@ -414,6 +438,7 @@ def check_emails() -> None:
     with MailBox(host=IMAP_HOST, port=IMAP_PORT).login(IMAP_USER, IMAP_PASSWORD) as mailbox:
         mailbox.folder.set(IMAP_MAILBOX)
 
+        # Fetching a message marks it as read.
         messages = list(mailbox.fetch(criteria="UNSEEN"))
         if not messages:
             logger.debug("No unread emails found")
@@ -421,10 +446,6 @@ def check_emails() -> None:
 
         for msg in messages:
             process_email(msg)
-
-        uids_to_mark_read = [msg.uid for msg in messages if msg.uid is not None]
-        mailbox.flag(uids_to_mark_read, [MailMessageFlags.SEEN], value=True)
-        logger.info(f"Marked {len(uids_to_mark_read)} emails as read")
 
 
 def create_state_table() -> None:
