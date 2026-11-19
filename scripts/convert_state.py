@@ -28,6 +28,10 @@ def released_entry_ids(entry: FeedEntry) -> set[str]:
 
 def seen_from_last_entry_id(feed: Feed, last_entry_id: str) -> set[str]:
     entry_ids = [entry.id for entry in feed.entries]
+    if last_entry_id in entry_ids:
+        return set(entry_ids[entry_ids.index(last_entry_id) :])
+
+    # Only when no entry has it as its ID: an entry identified by title can share its title with another's ID.
     for index, entry in enumerate(feed.entries):
         if last_entry_id in released_entry_ids(entry):
             return set(entry_ids[index:])

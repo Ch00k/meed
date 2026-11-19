@@ -176,9 +176,9 @@ and marked as read.
    lists it.
 3. **Email delivery**: New entries are sent in chronological order (oldest first) to preserve reading order.
 4. **State updates**: Each entry is recorded as seen as soon as its email is sent, by writing the state back to the
-   bucket, so a run that fails partway sends nothing twice. The one exception is an entry whose email went out but
-   whose state write failed even after boto3's retries, and that no later write in the run saved: the next run sends
-   it again.
+   bucket, so a run that fails partway sends nothing twice. The exception is an entry whose email went out but whose
+   updated state was never stored, because the write failed even after boto3's retries or the run stopped before it:
+   the next run sends it again.
 5. **Failures**: A feed that cannot be fetched or emailed is logged and skipped. A feed list or state that cannot be
    read from the bucket fails the run.
 

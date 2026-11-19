@@ -220,3 +220,18 @@ def test_main_sets_network_timeout(test_env: Path, monkeypatch: pytest.MonkeyPat
         assert socket.getdefaulttimeout() == NETWORK_TIMEOUT
     finally:
         socket.setdefaulttimeout(None)
+
+
+def test_exact_entry_id_comes_before_a_title_match(test_env: Path) -> None:
+    """A last entry ID that is an entry's own ID is found there, also when a newer entry identified by its title has
+    that title.
+    """
+    newer = create_feed_entry(None, "urn:daily", "Summary", None, "Mon, 01 Jan 2025 12:00:00 GMT")
+    older = create_feed_entry("urn:daily", "Old", "Summary", "http://example.com/old", "Mon, 01 Jan 2025 10:00:00 GMT")
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([newer, _entry("B", 11), older]))
+    feed_url = f"file://{feed_file}"
+    db_path = test_env / "state.db"
+    _write_db(db_path, [(feed_url, "urn:daily")])
+
+    assert convert(db_path) == {feed_url: {"urn:daily"}}
