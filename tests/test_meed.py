@@ -57,7 +57,7 @@ def test_new_feed_no_emails_sent(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Run meed once
-    main(run_once=True)
+    main()
 
     # Assert no emails sent
     assert_no_emails_sent(mock_smtp)
@@ -110,7 +110,7 @@ def test_new_entries_notification(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Run once to establish baseline
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
     # Add 2 new entries (D, E)
@@ -135,7 +135,7 @@ def test_new_entries_notification(test_env: Path, mock_smtp: MagicMock) -> None:
 
     # Run again
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Assert 2 emails sent
     from tests.test_utils import get_email_count
@@ -198,7 +198,7 @@ def test_no_new_entries(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Run once to establish baseline
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
@@ -207,7 +207,7 @@ def test_no_new_entries(test_env: Path, mock_smtp: MagicMock) -> None:
 
     # Run again without modifying feed
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # No emails sent
     assert_no_emails_sent(mock_smtp)
@@ -254,7 +254,7 @@ def test_multiple_feeds(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed1_url, feed2_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
     # Verify both feeds in database
@@ -273,7 +273,7 @@ def test_multiple_feeds(test_env: Path, mock_smtp: MagicMock) -> None:
     feed1_file.write_text(create_rss_feed(feed1_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Only 1 email sent (from feed1)
     from tests.test_utils import get_email_count
@@ -303,7 +303,7 @@ def test_entry_without_id(test_env: Path, caplog: pytest.LogCaptureFixture) -> N
     create_feeds_file([feed_url], feeds_file)
 
     # Run once
-    main(run_once=True)
+    main()
 
     # Check warning logged
     assert any("has no id" in record.message.lower() for record in caplog.records)
@@ -331,7 +331,7 @@ def test_entry_without_title(test_env: Path, mock_smtp: MagicMock, caplog: pytes
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add entry without title
     new_entries = [
@@ -344,7 +344,7 @@ def test_entry_without_title(test_env: Path, mock_smtp: MagicMock, caplog: pytes
 
     mock_smtp.reset_mock()
     caplog.clear()
-    main(run_once=True)
+    main()
 
     # Warning logged
     assert any("has no title" in record.message.lower() for record in caplog.records)
@@ -372,7 +372,7 @@ def test_entry_without_summary(test_env: Path, mock_smtp: MagicMock, caplog: pyt
     feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
     create_feeds_file([feed_url], feeds_file)
 
-    main(run_once=True)
+    main()
 
     # Add entry without summary
     new_entries = [
@@ -385,7 +385,7 @@ def test_entry_without_summary(test_env: Path, mock_smtp: MagicMock, caplog: pyt
 
     mock_smtp.reset_mock()
     caplog.clear()
-    main(run_once=True)
+    main()
 
     # Warning logged
     assert any("has no summary" in record.message.lower() for record in caplog.records)
@@ -415,7 +415,7 @@ def test_entry_without_published_date(test_env: Path, caplog: pytest.LogCaptureF
     feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
     create_feeds_file([feed_url], feeds_file)
 
-    main(run_once=True)
+    main()
 
     # Warning logged about missing date
     assert any("has no published date" in record.message.lower() for record in caplog.records)
@@ -449,7 +449,7 @@ def test_entry_with_multiple_date_fields(test_env: Path) -> None:
     feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
     create_feeds_file([feed_url], feeds_file)
 
-    main(run_once=True)
+    main()
 
     # Entry processed successfully
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
@@ -485,7 +485,7 @@ def test_atom_feed_processing(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
     # Add new entry
@@ -502,7 +502,7 @@ def test_atom_feed_processing(test_env: Path, mock_smtp: MagicMock) -> None:
     feed_file.write_text(create_atom_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Email sent for new entry
     assert get_email_count(mock_smtp) == 1
@@ -532,7 +532,7 @@ def test_feed_without_metadata(test_env: Path, caplog: pytest.LogCaptureFixture)
     feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
     create_feeds_file([feed_url], feeds_file)
 
-    main(run_once=True)
+    main()
 
     # Warning logged
     assert any("title" in record.message.lower() for record in caplog.records)
@@ -562,7 +562,7 @@ def test_malformed_feed_url(test_env: Path) -> None:
     create_feeds_file([invalid_url, valid_url], feeds_file)
 
     # Should not crash (feedparser handles invalid URLs gracefully)
-    main(run_once=True)
+    main()
 
     # Valid feed still processed
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
@@ -601,7 +601,7 @@ def test_network_error_simulation(test_env: Path, caplog: pytest.LogCaptureFixtu
         return original_parse(url, **kwargs)
 
     with patch("feedparser.parse", side_effect=mock_parse):
-        main(run_once=True)
+        main()
 
     # Error logged
     assert any("error" in record.message.lower() for record in caplog.records)
@@ -629,7 +629,7 @@ def test_smtp_error_handling(test_env: Path, mock_smtp: MagicMock, caplog: pytes
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add new entry
     new_entries = [
@@ -647,7 +647,7 @@ def test_smtp_error_handling(test_env: Path, mock_smtp: MagicMock, caplog: pytes
     mock_smtp.reset_mock()
 
     # Should not crash
-    main(run_once=True)
+    main()
 
     # Error logged
     assert any("error" in record.message.lower() for record in caplog.records)
@@ -675,7 +675,7 @@ def test_entry_order_preservation(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add 3 new entries in non-chronological order in XML
     new_entries = [
@@ -693,7 +693,7 @@ def test_entry_order_preservation(test_env: Path, mock_smtp: MagicMock) -> None:
     feed_file.write_text(create_rss_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # 3 emails sent
     assert get_email_count(mock_smtp) == 3
@@ -716,7 +716,7 @@ def test_empty_feeds_file(mock_smtp: MagicMock) -> None:
     feeds_file.write_text("")
 
     # Should not crash
-    main(run_once=True)
+    main()
 
     # No emails sent
     assert_no_emails_sent(mock_smtp)
@@ -739,7 +739,7 @@ def test_comments_in_feeds_file(test_env: Path) -> None:
     feeds_file.write_text(f"# This is a comment\n{feed_url}\n# Another comment")
 
     # Should process only valid URL
-    main(run_once=True)
+    main()
 
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
     rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
@@ -766,7 +766,7 @@ def test_duplicate_entries_in_feed(test_env: Path, mock_smtp: MagicMock) -> None
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add duplicate and new entry
     new_entries = [
@@ -785,7 +785,7 @@ def test_duplicate_entries_in_feed(test_env: Path, mock_smtp: MagicMock) -> None
     feed_file.write_text(create_rss_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Only 1 email sent (for genuinely new entry)
     assert get_email_count(mock_smtp) == 1
@@ -817,7 +817,7 @@ def test_very_old_entry_added(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline (C is latest)
-    main(run_once=True)
+    main()
 
     # Insert entry D between A and B (older than C)
     new_entries = [
@@ -831,7 +831,7 @@ def test_very_old_entry_added(test_env: Path, mock_smtp: MagicMock) -> None:
     feed_file.write_text(create_rss_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # No email sent (D is older than last known entry C)
     assert_no_emails_sent(mock_smtp)
@@ -860,13 +860,13 @@ def test_all_entries_removed_then_readded(test_env: Path, mock_smtp: MagicMock) 
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Clear feed entries
     feed_file.write_text(create_rss_feed([]))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # No emails sent
     assert_no_emails_sent(mock_smtp)
@@ -881,7 +881,7 @@ def test_all_entries_removed_then_readded(test_env: Path, mock_smtp: MagicMock) 
     feed_file.write_text(create_rss_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Only entry 4 is new (entry-3 is still the last known entry)
     assert get_email_count(mock_smtp) == 1
@@ -907,7 +907,7 @@ def test_state_database_corruption(test_env: Path, mock_smtp: MagicMock) -> None
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Delete database
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
@@ -915,7 +915,7 @@ def test_state_database_corruption(test_env: Path, mock_smtp: MagicMock) -> None
 
     mock_smtp.reset_mock()
     # Should recreate database
-    main(run_once=True)
+    main()
 
     # Feed treated as new (no emails)
     assert_no_emails_sent(mock_smtp)
@@ -941,7 +941,7 @@ def test_unicode_content(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add entry with unicode
     unicode_title = "Entry with emoji 🎉 and Chinese 中文"
@@ -959,7 +959,7 @@ def test_unicode_content(test_env: Path, mock_smtp: MagicMock) -> None:
     feed_file.write_text(create_rss_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Email sent
     assert get_email_count(mock_smtp) == 1
@@ -989,7 +989,7 @@ def test_html_in_summary(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add entry with HTML
     html_summary = "<p>This is <strong>bold</strong> and <em>italic</em> text.</p><a href='http://example.com'>Link</a>"
@@ -1002,7 +1002,7 @@ def test_html_in_summary(test_env: Path, mock_smtp: MagicMock) -> None:
     feed_file.write_text(create_rss_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Email sent
     assert get_email_count(mock_smtp) == 1
@@ -1033,7 +1033,7 @@ def test_feed_title_in_email_from_header(test_env: Path, mock_smtp: MagicMock) -
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add new entry
     new_entries = [
@@ -1045,7 +1045,7 @@ def test_feed_title_in_email_from_header(test_env: Path, mock_smtp: MagicMock) -
     feed_file.write_text(create_rss_feed(new_entries, feed_title=feed_title))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Email sent
     assert get_email_count(mock_smtp) == 1
@@ -1079,7 +1079,7 @@ def test_feed_entry_no_id_uses_title(test_env: Path, mock_smtp: MagicMock) -> No
     create_feeds_file([feed_url], feeds_file)
 
     # First run - creates state
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
     # Update feed with new entry
@@ -1097,7 +1097,7 @@ def test_feed_entry_no_id_uses_title(test_env: Path, mock_smtp: MagicMock) -> No
     feed_file.write_text(feed_xml)
 
     # Second run - should send email
-    main(run_once=True)
+    main()
     assert get_email_count(mock_smtp) == 1
 
 
@@ -1123,7 +1123,7 @@ def test_feed_entry_no_link(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # First run
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
     # Add new entry and verify link handling
@@ -1140,7 +1140,7 @@ def test_feed_entry_no_link(test_env: Path, mock_smtp: MagicMock) -> None:
     feed_xml = create_rss_feed(new_entries)
     feed_file.write_text(feed_xml)
 
-    main(run_once=True)
+    main()
     assert get_email_count(mock_smtp) == 1
 
 
@@ -1153,7 +1153,7 @@ def test_feeds_file_does_not_exist(mock_smtp: MagicMock) -> None:
     feeds_file.unlink()
 
     # Should not crash
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
 
@@ -1176,7 +1176,7 @@ def test_feed_no_metadata(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Should not crash
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
 
@@ -1234,7 +1234,7 @@ def test_feed_create_state_already_known(test_env: Path) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # First run creates state
-    main(run_once=True)
+    main()
 
     # Get the feed and try to create state again
     from meed import Feed
@@ -1331,24 +1331,6 @@ def test_logging_json_formatter_with_exception() -> None:
         assert "Test exception" in formatted
 
 
-def test_sentry_listener() -> None:
-    """Test sentry_listener function."""
-    from unittest.mock import Mock
-
-    from meed import sentry_listener
-
-    # Create a mock event with an exception
-    event = Mock()
-    event.exception = ValueError("Test exception")
-
-    # This should not crash
-    sentry_listener(event)
-
-    # Test with no exception
-    event.exception = None
-    sentry_listener(event)
-
-
 def test_feed_entry_no_id_no_link_no_title_raises_error(test_env: Path, mock_smtp: MagicMock) -> None:
     """Test that feed entry with no ID, link, or title raises InvalidFeedEntryError."""
     from meed import main
@@ -1372,7 +1354,7 @@ def test_feed_entry_no_id_no_link_no_title_raises_error(test_env: Path, mock_smt
     create_feeds_file([feed_url], feeds_file)
 
     # Should not crash, invalid entry should be filtered out
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
 
@@ -1416,7 +1398,7 @@ def test_assert_email_sent_helper(test_env: Path, mock_smtp: MagicMock) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Establish baseline
-    main(run_once=True)
+    main()
 
     # Add new entry
     new_entries = [
@@ -1432,7 +1414,7 @@ def test_assert_email_sent_helper(test_env: Path, mock_smtp: MagicMock) -> None:
     feed_file.write_text(create_rss_feed(new_entries))
 
     mock_smtp.reset_mock()
-    main(run_once=True)
+    main()
 
     # Verify email was sent - just check that the function works (covers lines 156-175)
     sendmail_mock = mock_smtp.return_value.__enter__.return_value.sendmail
@@ -1466,7 +1448,7 @@ def test_assert_feed_state_helper(test_env: Path) -> None:
     create_feeds_file([feed_url], feeds_file)
 
     # Create state
-    main(run_once=True)
+    main()
 
     # Test the helper function
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
@@ -1525,7 +1507,7 @@ def test_feed_with_mix_of_valid_and_invalid_entries(test_env: Path, mock_smtp: M
     create_feeds_file([feed_url], feeds_file)
 
     # Should not crash, should process valid entries only
-    main(run_once=True)
+    main()
     assert_no_emails_sent(mock_smtp)
 
     # Verify state was created with valid entry

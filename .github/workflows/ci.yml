@@ -48,3 +48,52 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           generate_release_notes: true
+
+  # meed runs as one scheduled Fly Machine (see "Deployment" in README.md). `fly deploy` is not used: it manages only
+  # Machines in a fly.toml process group and would not keep the schedule. The Machine is updated in place instead.
+  deploy:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: test
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      IMAGE: registry.fly.io/meed:${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Fly registry tokens expire in about five minutes, so authenticate after the build.
+      - name: Push image to Fly registry
+        run: |
+          flyctl auth docker
+          docker push "$IMAGE"
+
+      # --skip-start leaves the next run to the schedule instead of starting one now.
+      - name: Update the Machine
+        run: |
+          machines=$(flyctl machine list --app meed --json | jq -r '.[].id')
+          if [ "$(echo "$machines" | wc -w)" -ne 1 ]; then
+            echo "Expected exactly one Machine in app meed, found: $machines"
+            exit 1
+          fi
+          flyctl machine update "$machines" --app meed --image "$IMAGE" --skip-start --yes
+
+      # A Machine that lost its schedule never runs again, and one restarted on exit runs in a loop. Neither shows up
+      # anywhere else, so fail the deploy instead.
+      - name: Check the Machine is still scheduled
+        run: |
+          flyctl machine list --app meed --json \
+            | jq -e '.[0].config | .schedule == "hourly" and .restart.policy == "no"' \
+            || { flyctl machine list --app meed --json | jq '.[0].config | {schedule, restart}'; exit 1; }

@@ -1,23 +1,17 @@
 import logging
-import signal
 import smtplib
 import sqlite3
-import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from email.mime.text import MIMEText
 from importlib.metadata import version
 from pathlib import Path
-from types import FrameType
 from typing import Any
 
 import environs
 import feedparser
 import sentry_sdk
-from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.triggers.cron import CronTrigger
 from dateutil import parser as date_parser
 from imap_tools import MailBox, MailMessageFlags
 from imap_tools.message import MailMessage
@@ -67,8 +61,6 @@ SMTP_PASSWORD = env.str("MEED_SMTP_PASSWORD", "password")
 
 EMAIL_FROM = env.str("MEED_EMAIL_FROM", "meed@example.com")
 EMAIL_TO = env.str("MEED_EMAIL_TO", "my@e.mail")
-
-CRON_SCHEDULE = env.str("MEED_CRON_SCHEDULE", "0 */4 * * *")
 
 IMAP_HOST = env.str("MEED_IMAP_HOST", None)
 IMAP_PORT = env.int("MEED_IMAP_PORT", 993)
@@ -465,35 +457,12 @@ def job() -> None:
         sentry_sdk.capture_exception(e)
 
 
-def sentry_listener(event: JobExecutionEvent) -> None:
-    if event.exception:
-        sentry_sdk.capture_exception(event.exception)
-
-
-def main(*, run_once: bool = False) -> None:
+def main() -> None:
+    """Run one check and return. meed does not schedule itself: whatever starts it decides how often."""
     logger.info("Starting meed...")
     logger.info(f"Using User-Agent: {USER_AGENT}")
     create_state_table()
-
-    if run_once:
-        check_feeds()
-        return
-
-    logger.info(f"Creating schedule with crontab '{CRON_SCHEDULE}'")
-
-    scheduler = BlockingScheduler()
-
-    # TODO: This does not seem to work - nothing in Sentry
-    scheduler.add_listener(sentry_listener, mask=EVENT_JOB_ERROR)
-    scheduler.add_job(job, CronTrigger.from_crontab(CRON_SCHEDULE))
-
-    def signal_handler_scheduler(_: int, __: FrameType | None) -> None:
-        scheduler.shutdown()
-
-    for s in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM]:
-        signal.signal(s, signal_handler_scheduler)
-
-    scheduler.start()
+    job()
 
 
 if __name__ == "__main__":
@@ -508,9 +477,4 @@ if __name__ == "__main__":
     if SENTRY_DSN:
         sentry_sdk.init(dsn=SENTRY_DSN)
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--once":
-        run_once = True
-    else:
-        run_once = False
-
-    main(run_once=run_once)
+    main()
