@@ -45,7 +45,7 @@ jobs:
       contents: write
     steps:
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
 
@@ -83,8 +83,14 @@ jobs:
       # The Machine is replaced rather than updated: `fly machine update` can drop a Machine from Fly's scheduler while
       # its config still says hourly, while a new Machine's schedule starts with the Machine. Without --force, Fly
       # refuses to destroy a Machine that is running a check, so a deploy never cuts one short; re-run the job then.
+      # The volume is given by ID: given a name, flyctl creates a new, empty volume when it finds none unattached.
       - name: Replace the Machine
         run: |
+          volumes=$(flyctl volumes list --app meed --json | jq -r '.[] | select(.name == "meed_data") | .id')
+          if [ "$(echo "$volumes" | wc -w)" -ne 1 ]; then
+            echo "Expected exactly one meed_data volume in app meed, found: $volumes"
+            exit 1
+          fi
           machines=$(flyctl machine list --app meed --json | jq -r '.[].id')
           if [ "$(echo "$machines" | wc -w)" -gt 1 ]; then
             echo "Expected at most one Machine in app meed, found: $machines"
@@ -92,10 +98,20 @@ jobs:
           fi
           if [ -n "$machines" ]; then
             flyctl machine destroy "$machines" --app meed
+            flyctl machine wait "$machines" --app meed --state destroyed
           fi
-          flyctl machine run "$IMAGE" --app meed --region fra --name meed --volume meed_data:/data \
+          flyctl machine run "$IMAGE" --app meed --region fra --name meed --volume "$volumes:/data" \
             --vm-size shared-cpu-1x --vm-memory 256 --restart no --schedule hourly --detach
 
-      # The new Machine runs one check straight away. One that never stops holds the schedule, and the bill, forever.
-      - name: Wait for the first check to finish
-        run: flyctl machine wait "$(flyctl machine list --app meed --json | jq -r '.[0].id')" --app meed --state stopped
+      # The new Machine runs one check straight away. One that never stops holds the schedule, and the bill, forever,
+      # and one that fails would fail every hour. With --restart no, a crash also ends in `stopped`, so read how it
+      # exited. Fly omits zero values from the exit event, and records it in one of two places.
+      - name: Check the first run
+        run: |
+          machine=$(flyctl machine list --app meed --json | jq -r '.[0].id')
+          flyctl machine wait "$machine" --app meed --state stopped --wait-timeout 15m
+          flyctl machine status "$machine" --app meed
+          flyctl machine list --app meed --json | jq -e '
+            first(.[0].events[] | select(.type == "exit")).request
+            | (.MonitorEvent.exit_event // .exit_event)
+            | . != null and (.exit_code // 0) == 0 and (.signal // 0) == 0 and (.oom_killed // false | not)'
