@@ -2,59 +2,32 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - '*'
+    branches: [main]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
 
+permissions:
+  contents: read
+
+# The deploy job requires a tag ref, so pushes to main and pull requests only check: production only ever deploys
+# from a release tag, and only once everything a deploy depends on has passed.
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-extras --dev
-
-      - name: Run linting
-        run: make lint
-
-      - name: Run tests
-        run: make test
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-  release:
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: test
-    permissions:
-      contents: write
-    steps:
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          generate_release_notes: true
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: uv sync --locked
+      - run: make check
 
   # meed runs as one scheduled Fly Machine (see "Deployment" in README.md). `fly deploy` is not used: it manages only
-  # Machines in a fly.toml process group and would not keep the schedule. The Machine is updated in place instead.
+  # Machines in a fly.toml process group and would not keep the schedule.
   deploy:
-    runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: test
+    needs: check
+    runs-on: ubuntu-latest
     concurrency:
       group: deploy
       cancel-in-progress: false
@@ -63,9 +36,21 @@ jobs:
       IMAGE: registry.fly.io/meed:${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+
+      # The tag names the release, and pyproject.toml says which version the code is.
+      - name: Check the tag is the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "The tag is $GITHUB_REF_NAME, but pyproject.toml says $version."
+            exit 1
+          fi
+
       - uses: superfly/flyctl-actions/setup-flyctl@v1
       - uses: docker/setup-buildx-action@v4
 
+      # Built here rather than on Fly's builder. load puts the image in the local Docker daemon, to be pushed once
+      # authenticated, and the GitHub Actions cache reuses layers across runs.
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -74,8 +59,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Fly registry tokens expire in about five minutes, so authenticate after the build.
-      - name: Push image to Fly registry
+      # Authenticated right before the push: Fly's registry tokens expire in about five minutes, which a slow build
+      # could outlast.
+      - name: Push the image to Fly's registry
         run: |
           flyctl auth docker
           docker push "$IMAGE"

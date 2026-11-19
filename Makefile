@@ -1,18 +1,17 @@
-.PHONY: lint test release-patch release-minor release-major
+.PHONY: lint check test
 
 lint:
 	uv run ruff format .
 	uv run ruff check --fix .
-	uv run mypy --config-file pyproject.toml .
+	uv run ty check
+
+# What has to pass before a deploy. Unlike lint it changes no file.
+check:
+	uv lock --check
+	uv run ruff format --check .
+	uv run ruff check .
+	uv run ty check
+	uv run pytest
 
 test:
-	uv run pytest -s -vvv --cov --cov-branch --cov-report=xml tests/
-
-release-patch:
-	./release.sh patch
-
-release-minor:
-	./release.sh minor
-
-release-major:
-	./release.sh major
+	uv run pytest

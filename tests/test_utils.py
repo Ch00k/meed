@@ -1,8 +1,10 @@
 import sqlite3
 from email import message_from_string
-from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    from unittest.mock import MagicMock
 
 
 def create_feed_entry(

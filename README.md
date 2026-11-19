@@ -52,14 +52,26 @@ straight away and then hourly.
    ```bash
    fly ssh sftp put feeds.txt /data/feeds.txt --app meed --machine <seed machine id>
    fly ssh sftp put state.db /data/state.db --app meed --machine <seed machine id>
+   fly ssh console --app meed --machine <seed machine id> -C "chown -R meed:meed /data"
    fly machine destroy <seed machine id> --app meed --force
    ```
+   meed runs as the user `meed`, and SFTP writes the files as root, hence the `chown`.
 
-3. Give CI a deploy token, then push a release tag (`make release-patch`): its `deploy` job creates the scheduled
-   Machine.
+3. Give CI a deploy token, then release (below): the first release's `deploy` job creates the scheduled Machine.
    ```bash
    fly tokens create deploy --app meed | gh secret set FLY_API_TOKEN
    ```
+
+### Releasing
+
+A release is a version tag. CI (`.github/workflows/ci.yml`) runs `make check` on every push, and on a tag such as
+`0.4.0` it also builds the image and deploys it, refusing a tag that is not the version in `pyproject.toml`:
+
+```bash
+# Bump version in pyproject.toml, commit, then:
+git tag 0.4.0
+git push origin main 0.4.0
+```
 
 Fly snapshots the volume daily and keeps the snapshots for 5 days.
 
@@ -148,4 +160,5 @@ The test suite includes comprehensive tests covering:
 make lint
 ```
 
-This runs `ruff` for linting/formatting and `mypy` for static type checking.
+This runs `ruff` for linting/formatting and `ty` for static type checking. `make check` runs everything CI does
+before a deploy without changing any file: the lockfile check, `ruff`, `ty` and the tests.

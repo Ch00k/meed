@@ -1,8 +1,13 @@
+import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from _pytest.monkeypatch import MonkeyPatch
+from meed import add_feed_to_file, is_valid_feed, parse_email_body, read_feeds_file
+from tests.test_utils import create_rss_feed
 
-from meed import add_feed_to_file, is_valid_feed, parse_email_body
+if TYPE_CHECKING:
+    import pytest
+    from _pytest.monkeypatch import MonkeyPatch
 
 
 def test_parse_email_body_with_url_only() -> None:
@@ -141,23 +146,29 @@ def test_add_feed_to_file_category_at_end(tmp_path: Path) -> None:
     assert "https://blog2.com/feed" in lines
 
 
-def test_is_valid_feed_with_mock(monkeypatch: MonkeyPatch) -> None:
-    """Test feed validation with mocked feedparser."""
-    from unittest.mock import MagicMock
+def test_is_valid_feed_accepts_a_feed(tmp_path: Path) -> None:
+    """An RSS document is a feed."""
+    feed_file = tmp_path / "feed.xml"
+    feed_file.write_text(create_rss_feed([]))
 
-    mock_parse = MagicMock()
+    assert is_valid_feed(f"file://{feed_file}") is True
 
-    # Test valid feed
-    mock_parse.return_value = MagicMock(entries=[{"id": "1"}])
-    monkeypatch.setattr("meed.feedparser.parse", mock_parse)
 
-    result = is_valid_feed("https://example.com/feed")
-    assert result is True
+def test_is_valid_feed_rejects_a_web_page(tmp_path: Path) -> None:
+    """An HTML page is not a feed, although feedparser parses it without an error."""
+    page = tmp_path / "page.html"
+    page.write_text("<!doctype html><html><head><title>Blog</title></head><body><p>Hello</p></body></html>")
 
-    # Test exception
-    mock_parse.side_effect = Exception("Network error")
-    result = is_valid_feed("https://example.com/feed")
-    assert result is False
+    assert is_valid_feed(f"file://{page}") is False
+
+
+def test_is_valid_feed_rejects_an_unreachable_url(caplog: pytest.LogCaptureFixture) -> None:
+    """A URL that cannot be fetched is not a feed, and the failure is logged."""
+    # Nothing listens on port 1, so the connection is refused.
+    url = "http://127.0.0.1:1/feed.xml"
+
+    assert is_valid_feed(url) is False
+    assert any(f"Error validating feed {url}" in message for message in caplog.messages)
 
 
 def test_process_email_with_valid_feed(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -333,11 +344,9 @@ def test_check_emails_with_messages(tmp_path: Path, monkeypatch: MonkeyPatch) ->
 
         meed.check_emails()
 
-        # Verify messages were marked as read
-        mock_mailbox.flag.assert_called_once()
-        call_args = mock_mailbox.flag.call_args[0]
-        assert "123" in call_args[0]
-        assert "124" in call_args[0]
+        # Both feeds were added; fetching the messages marked them as read
+        mock_mailbox.fetch.assert_called_once_with(criteria="UNSEEN")
+        assert read_feeds_file(feeds_file) == ["https://example.com/feed1", "https://example.com/feed2"]
 
 
 def test_check_emails_no_unread(monkeypatch: MonkeyPatch) -> None:
@@ -364,8 +373,8 @@ def test_check_emails_no_unread(monkeypatch: MonkeyPatch) -> None:
 
         meed.check_emails()
 
-        # Verify flag was not called
-        mock_mailbox.flag.assert_not_called()
+        # No feed was added
+        assert read_feeds_file(Path(os.environ["MEED_FEEDS_FILE_PATH"])) == []
 
 
 def test_job_handles_check_emails_exception(monkeypatch: MonkeyPatch) -> None:

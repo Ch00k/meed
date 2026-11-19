@@ -2,14 +2,18 @@
 # ABOUTME: Provides test environment setup and SMTP mocking.
 
 import sys
-from collections.abc import Generator
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from _pytest.monkeypatch import MonkeyPatch
 
 from tests.test_utils import setup_test_env
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
+
+    from _pytest.monkeypatch import MonkeyPatch
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +31,7 @@ def test_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def mock_smtp() -> Generator[MagicMock, None, None]:
+def mock_smtp() -> Generator[MagicMock]:
     """Mock smtplib.SMTP_SSL for email testing."""
     with patch("smtplib.SMTP_SSL") as mock:
         yield mock

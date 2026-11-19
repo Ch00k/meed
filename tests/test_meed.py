@@ -3,11 +3,10 @@
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
+from typing import TYPE_CHECKING
 
 from tests.test_utils import (
+    assert_feed_state,
     assert_no_emails_sent,
     create_atom_feed,
     create_feed_entry,
@@ -17,6 +16,11 @@ from tests.test_utils import (
     get_email_count,
     query_db,
 )
+
+if TYPE_CHECKING:
+    from unittest.mock import MagicMock
+
+    import pytest
 
 
 def test_new_feed_no_emails_sent(test_env: Path, mock_smtp: MagicMock) -> None:
@@ -1212,45 +1216,6 @@ def test_feed_get_new_entries_with_no_last_id(test_env: Path) -> None:
     assert len(new_entries) == 2
 
 
-def test_feed_create_state_already_known(test_env: Path) -> None:
-    """Test that create_state does nothing if feed is already known."""
-    from meed import main
-
-    entries = [
-        create_feed_entry(
-            "http://example.com/entry-1",
-            "Entry 1",
-            "Summary 1",
-            "http://example.com/1",
-            "Mon, 01 Jan 2025 10:00:00 GMT",
-        )
-    ]
-    feed_xml = create_rss_feed(entries)
-    feed_file = test_env / "data" / "feed.xml"
-    feed_file.write_text(feed_xml)
-
-    feed_url = f"file://{feed_file}"
-    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
-    create_feeds_file([feed_url], feeds_file)
-
-    # First run creates state
-    main()
-
-    # Get the feed and try to create state again
-    from meed import Feed
-
-    feed = Feed.from_url(feed_url)
-    assert feed.is_known()
-
-    # This should be a no-op
-    feed.create_state()
-
-    # State should still be the same
-    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    rows = query_db(state_db, "SELECT COUNT(*) FROM feeds WHERE id = ?", (feed_url,))
-    assert rows[0][0] == 1  # Only one entry
-
-
 def test_job_function_exception_handling(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that job() function handles exceptions properly."""
     from meed import job
@@ -1389,6 +1354,7 @@ def test_feed_entry_no_id_no_link_no_title_raises_error(test_env: Path, mock_smt
 
 def test_feedparser_uses_custom_user_agent() -> None:
     """Test that feedparser is configured with a custom User-Agent to avoid bot detection."""
+    import tomllib
     from unittest.mock import patch
 
     from meed import Feed
@@ -1405,7 +1371,9 @@ def test_feedparser_uses_custom_user_agent() -> None:
         mock_parse.assert_called_once()
         call_kwargs = mock_parse.call_args[1]
         assert "agent" in call_kwargs
-        assert "meed" in call_kwargs["agent"]  # Should identify as meed
+        # Should identify as meed, at the version in pyproject.toml
+        project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"]
+        assert call_kwargs["agent"].startswith(f"meed/{project['version']} ")
         assert "github.com/Ch00k/meed" in call_kwargs["agent"]  # Should have project URL
         assert "feedparser" not in call_kwargs["agent"].lower()  # Should not contain default feedparser UA
 
@@ -1543,3 +1511,170 @@ def test_feed_with_mix_of_valid_and_invalid_entries(test_env: Path, mock_smtp: M
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
     rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
     assert len(rows) > 0
+
+
+def _sent_subjects(mock_smtp: MagicMock) -> list[str]:
+    """The Subject header of every email sent, in the order they were sent."""
+    from email import message_from_string
+
+    sendmail_mock = mock_smtp.return_value.__enter__.return_value.sendmail
+    return [message_from_string(call.args[2])["Subject"] for call in sendmail_mock.call_args_list]
+
+
+def test_failed_send_keeps_the_entries_already_sent(
+    test_env: Path, mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When an email fails partway through a feed's new entries, the next run sends only the ones not sent yet.
+
+    Three new entries arrive; the second email fails. The state must then point at the first entry, and the next
+    run must send the second and third and nothing else.
+    """
+    from meed import main
+
+    def entry(n: int) -> dict:
+        return create_feed_entry(
+            f"http://example.com/{n}",
+            f"Entry {n}",
+            f"Summary {n}",
+            f"http://example.com/{n}",
+            f"Mon, 01 Jan 2025 1{n}:00:00 GMT",
+        )
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([entry(1)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+
+    main()
+
+    feed_file.write_text(create_rss_feed([entry(1), entry(2), entry(3), entry(4)]))
+    sendmail_mock = mock_smtp.return_value.__enter__.return_value.sendmail
+    sendmail_mock.side_effect = [None, Exception("SMTP failed")]
+
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry 2", "Entry 3"]
+    assert "Error processing feed Test Feed: SMTP failed" in caplog.messages
+    assert_feed_state(state_db, feed_url, "http://example.com/2")
+
+    mock_smtp.reset_mock()
+    sendmail_mock.side_effect = None
+
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry 3", "Entry 4"]
+    assert_feed_state(state_db, feed_url, "http://example.com/4")
+
+
+def test_line_breaks_in_titles_are_sent_on_one_line(test_env: Path, mock_smtp: MagicMock) -> None:
+    """A line break in an entry's or a feed's title is sent as a space: an email header cannot hold one."""
+    from email import message_from_string
+
+    from meed import main
+
+    first = create_feed_entry(
+        "http://example.com/1", "Entry 1", "Summary 1", "http://example.com/1", "Mon, 01 Jan 2025 10:00:00 GMT"
+    )
+    second = create_feed_entry(
+        "http://example.com/2", "Two\nlines", "Summary 2", "http://example.com/2", "Mon, 01 Jan 2025 11:00:00 GMT"
+    )
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([first], feed_title="Feed\nName"))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+    feed_file.write_text(create_rss_feed([first, second], feed_title="Feed\nName"))
+    main()
+
+    assert get_email_count(mock_smtp) == 1
+    message = message_from_string(mock_smtp.return_value.__enter__.return_value.sendmail.call_args.args[2])
+    assert message["Subject"] == "Two lines"
+    assert message["From"] == "Feed Name <from@test.com>"
+    assert_feed_state(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, "http://example.com/2")
+
+
+def test_entries_of_a_feed_first_seen_empty_are_sent_oldest_first(test_env: Path, mock_smtp: MagicMock) -> None:
+    """A feed with no entries when first seen gets state with no last entry; everything it later has is new.
+
+    Those entries are sent oldest first, like any other new entries, whatever order the feed lists them in.
+    """
+    from meed import main
+
+    entries = [
+        create_feed_entry(
+            f"http://example.com/{n}",
+            f"Entry {n}",
+            f"Summary {n}",
+            f"http://example.com/{n}",
+            f"Mon, 01 Jan 2025 1{n}:00:00 GMT",
+        )
+        for n in (3, 1, 2)
+    ]
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+    assert_no_emails_sent(mock_smtp)
+
+    feed_file.write_text(create_rss_feed(entries))
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry 1", "Entry 2", "Entry 3"]
+    assert_feed_state(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, "http://example.com/3")
+
+
+def test_entry_with_unreadable_date_is_skipped(test_env: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """An entry whose date cannot be read is skipped with a warning, and the rest of the feed is processed."""
+    from meed import main
+
+    entries = [
+        create_feed_entry(
+            "http://example.com/1", "Entry 1", "Summary 1", "http://example.com/1", "Mon, 01 Jan 2025 10:00:00 GMT"
+        ),
+        create_feed_entry("http://example.com/2", "Entry 2", "Summary 2", "http://example.com/2", "not a date"),
+    ]
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed(entries))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+
+    assert any("http://example.com/2 has no published date" in record.message for record in caplog.records)
+    assert_feed_state(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, "http://example.com/1")
+
+
+def test_log_timestamp_is_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The JSON log's timestamp is in UTC, which its Z says, whatever the machine's time zone."""
+    import json
+    import logging
+    import time
+
+    from meed import MeedJSONFormatter
+
+    record = logging.LogRecord("test", logging.INFO, "test.py", 1, "Test message", (), None)
+    record.created = 0
+
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    try:
+        formatted = json.loads(MeedJSONFormatter().format(record))
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+    assert formatted["timestamp"] == "1970-01-01T00:00:00.000000Z"
+
+
+def test_read_feeds_file_skips_comments_and_blank_lines(tmp_path: Path) -> None:
+    """Comments, indented ones included, and blank lines are not feeds."""
+    from meed import read_feeds_file
+
+    feeds_file = tmp_path / "feeds.txt"
+    feeds_file.write_text("# blogs\nhttps://a.example/feed\n\n  # indented\n  https://b.example/feed  \n")
+
+    assert read_feeds_file(feeds_file) == ["https://a.example/feed", "https://b.example/feed"]
