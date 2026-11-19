@@ -148,22 +148,20 @@ def test_add_feed_to_file_category_at_end(tmp_path: Path) -> None:
     assert "https://blog2.com/feed" in lines
 
 
-def test_is_valid_feed_accepts_rss_and_atom(serve_feed: Callable[[int, str], str]) -> None:
+def test_is_valid_feed_accepts_rss_and_atom(serve_feed: Callable[..., str]) -> None:
     """An RSS or Atom document served over HTTP is a feed."""
     assert is_valid_feed(serve_feed(200, create_rss_feed([]))) is True
     assert is_valid_feed(serve_feed(200, create_atom_feed([]))) is True
 
 
-def test_is_valid_feed_rejects_a_web_page(serve_feed: Callable[[int, str], str]) -> None:
+def test_is_valid_feed_rejects_a_web_page(serve_feed: Callable[..., str]) -> None:
     """An HTML page is not a feed, although feedparser parses it without an error."""
     page = "<!doctype html><html><head><title>Blog</title></head><body><p>Hello</p></body></html>"
 
     assert is_valid_feed(serve_feed(200, page)) is False
 
 
-def test_is_valid_feed_rejects_an_http_error(
-    serve_feed: Callable[[int, str], str], caplog: pytest.LogCaptureFixture
-) -> None:
+def test_is_valid_feed_rejects_an_http_error(serve_feed: Callable[..., str], caplog: pytest.LogCaptureFixture) -> None:
     """A feed document served with an error status is not a feed, and the error is logged."""
     url = serve_feed(404, create_rss_feed([]))
 
@@ -181,6 +179,14 @@ def test_is_valid_feed_rejects_what_is_not_an_http_url(tmp_path: Path, caplog: p
     assert is_valid_feed(str(feed_file)) is False
     assert is_valid_feed(inline) is False
     assert f"file://{feed_file} is not an HTTP(S) URL" in caplog.messages
+
+
+def test_is_valid_feed_rejects_a_malformed_url(caplog: pytest.LogCaptureFixture) -> None:
+    """A URL that cannot even be parsed is not a feed, and the error is logged instead of raised."""
+    url = "http://[::1/feed.xml"
+
+    assert is_valid_feed(url) is False
+    assert any(f"Error validating feed {url}" in message for message in caplog.messages)
 
 
 def test_is_valid_feed_rejects_an_unreachable_url(caplog: pytest.LogCaptureFixture) -> None:

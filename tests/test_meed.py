@@ -1162,27 +1162,27 @@ def test_feeds_file_does_not_exist(mock_smtp: MagicMock) -> None:
     assert_no_emails_sent(mock_smtp)
 
 
-def test_feed_no_metadata(test_env: Path, mock_smtp: MagicMock) -> None:
-    """Test handling of malformed feed with no metadata."""
-    from meed import Feed, main
+def test_document_that_is_not_a_feed_gets_no_state(
+    test_env: Path, mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An XML document that is not RSS or Atom, such as an error page, is a failed fetch and gets no state."""
+    import pytest
 
-    # Create a minimal/broken XML that feedparser will parse but has no feed metadata
+    from meed import Feed, FeedFetchError, main
+
     feed_file = test_env / "data" / "feed.xml"
     feed_file.write_text('<?xml version="1.0"?><root></root>')
-
     feed_url = f"file://{feed_file}"
 
-    # Parse directly to ensure we hit the no-feed-metadata path
-    feed = Feed.from_url(feed_url)
-    assert feed.metadata.id == feed_url
-    assert feed.metadata.title == feed_url
+    with pytest.raises(FeedFetchError, match="is not an RSS or Atom feed"):
+        Feed.from_url(feed_url)
 
-    feeds_file = Path(os.environ["MEED_FEEDS_FILE_PATH"])
-    create_feeds_file([feed_url], feeds_file)
-
-    # Should not crash
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
     main()
+
     assert_no_emails_sent(mock_smtp)
+    assert query_db(Path(os.environ["MEED_STATE_DB_PATH"]), "SELECT COUNT(*) FROM feeds")[0][0] == 0
+    assert f"Error fetching or parsing feed {feed_url}: {feed_url} is not an RSS or Atom feed" in caplog.messages
 
 
 def test_feed_get_new_entries_with_no_last_id(test_env: Path) -> None:
@@ -1362,6 +1362,7 @@ def test_feedparser_uses_custom_user_agent() -> None:
 
     with patch("feedparser.parse") as mock_parse:
         mock_parse.return_value = {
+            "version": "rss20",
             "feed": {"id": "http://example.com", "title": "Test Feed"},
             "entries": [],
         }
@@ -1735,7 +1736,7 @@ def test_entries_with_the_same_date_are_sent_once(
 
 
 def test_new_feed_answering_with_an_http_error_gets_no_state(
-    serve_feed: Callable[[int, str], str], mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
+    serve_feed: Callable[..., str], mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A new feed whose server answers with an error gets no state, even when the error response is a feed."""
     from meed import main
@@ -1748,3 +1749,20 @@ def test_new_feed_answering_with_an_http_error_gets_no_state(
     assert_no_emails_sent(mock_smtp)
     assert query_db(Path(os.environ["MEED_STATE_DB_PATH"]), "SELECT COUNT(*) FROM feeds")[0][0] == 0
     assert f"Error fetching or parsing feed {url}: HTTP 503 from {url}" in caplog.messages
+
+
+def test_redirect_to_an_error_page_gets_no_state(
+    serve_feed: Callable[..., str], mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A new feed whose URL redirects to an error page gets no state, although feedparser records the redirect's 301."""
+    from meed import main
+
+    target = serve_feed(503, "<!doctype html><html><body>Service Unavailable</body></html>")
+    redirecting = serve_feed(301, "", {"Location": target})
+    create_feeds_file([redirecting], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+
+    assert_no_emails_sent(mock_smtp)
+    assert query_db(Path(os.environ["MEED_STATE_DB_PATH"]), "SELECT COUNT(*) FROM feeds")[0][0] == 0
+    assert any(f"{redirecting} is not an RSS or Atom feed" in message for message in caplog.messages)

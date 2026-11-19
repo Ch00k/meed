@@ -40,37 +40,43 @@ def mock_smtp() -> Generator[MagicMock]:
 
 
 class FeedServer(ThreadingHTTPServer):
-    """Answers every GET with the status and body a test gave it."""
+    """Answers a GET for each path with the status, body and headers a test gave it."""
 
-    status = 200
-    body = ""
+    responses: dict[str, tuple[int, str, dict[str, str]]]
 
 
 class FeedRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         server = self.server
         assert isinstance(server, FeedServer)
+        status, body, headers = server.responses[self.path]
 
-        self.send_response(server.status)
+        self.send_response(status)
         self.send_header("Content-Type", "application/xml")
+        for name, value in headers.items():
+            self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(server.body.encode())
+        self.wfile.write(body.encode())
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         """Keep requests out of the test output."""
 
 
 @pytest.fixture
-def serve_feed() -> Generator[Callable[[int, str], str]]:
-    """Serve a response over HTTP on localhost: serve_feed(status, body) returns the URL that answers with it."""
+def serve_feed() -> Generator[Callable[..., str]]:
+    """Serve responses over HTTP on localhost.
+
+    serve_feed(status, body, headers=None) returns a URL of its own that answers with that response.
+    """
     server = FeedServer(("127.0.0.1", 0), FeedRequestHandler)
+    server.responses = {}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    def serve(status: int, body: str) -> str:
-        server.status = status
-        server.body = body
-        return f"http://127.0.0.1:{server.server_port}/feed.xml"
+    def serve(status: int, body: str, headers: dict[str, str] | None = None) -> str:
+        path = f"/{len(server.responses)}.xml"
+        server.responses[path] = (status, body, headers or {})
+        return f"http://127.0.0.1:{server.server_port}{path}"
 
     yield serve
 

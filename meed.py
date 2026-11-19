@@ -57,7 +57,7 @@ class InvalidFeedEntryError(Exception):
 
 
 class FeedFetchError(Exception):
-    """Raised when a feed's server answers with an HTTP error."""
+    """Raised when a feed's server answers with an HTTP error, or with something that is not a feed."""
 
 
 env = environs.Env()
@@ -204,16 +204,12 @@ class Feed(BaseModel):
     def from_url(cls, url: str) -> Feed:
         parsed_feed = fetch_feed(url)
 
-        if "feed" in parsed_feed:
-            logger.info(f"Replacing feed ID with URL for feed {url}")
-            parsed_feed["feed"]["id"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
+        logger.info(f"Replacing feed ID with URL for feed {url}")
+        parsed_feed["feed"]["id"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
 
-            if not parsed_feed["feed"].get("title"):  # pyright: ignore[reportAttributeAccessIssue]
-                logger.warning(f"Feed {url} has no title, using URL as title")
-                parsed_feed["feed"]["title"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
-        else:
-            logger.warning(f"Feed {url} has no feed metadata, using URL as ID and title")
-            parsed_feed["feed"] = {"id": url, "title": url}
+        if not parsed_feed["feed"].get("title"):  # pyright: ignore[reportAttributeAccessIssue]
+            logger.warning(f"Feed {url} has no title, using URL as title")
+            parsed_feed["feed"]["title"] = url  # pyright: ignore[reportCallIssue,reportArgumentType]
 
         return cls(**parsed_feed)  # pyright: ignore[reportArgumentType]
 
@@ -294,10 +290,10 @@ def read_feeds_file(file_path: Path) -> list[str]:
 
 
 def fetch_feed(url: str) -> feedparser.FeedParserDict:
-    """Fetch and parse a feed, raising when the fetch fails.
+    """Fetch and parse an RSS or Atom feed, raising when the fetch fails or what it fetched is not a feed.
 
-    feedparser itself reports a failed fetch as an empty feed. Taken as one, a new feed would get state with no last
-    entry, and its first successful fetch would email the whole backlog.
+    feedparser itself reports a failed fetch, or an error page, as an empty feed. Taken as one, a new feed would get
+    state with no last entry, and its first successful fetch would email the whole backlog.
     """
     parsed_feed = feedparser.parse(url, agent=USER_AGENT)
 
@@ -308,6 +304,12 @@ def fetch_feed(url: str) -> feedparser.FeedParserDict:
     status = parsed_feed.get("status", 200)
     if status >= 400:
         msg = f"HTTP {status} from {url}"
+        raise FeedFetchError(msg)
+
+    # feedparser names the format of a feed it recognises, such as rss20 or atom10. After a redirect, `status` holds
+    # the redirect's code, so this is also what rejects an error page at the end of one.
+    if not parsed_feed.get("version", "").startswith(("rss", "atom")):
+        msg = f"{url} is not an RSS or Atom feed"
         raise FeedFetchError(msg)
 
     return parsed_feed
@@ -337,19 +339,19 @@ def is_valid_feed(url: str) -> bool:
     """Check that a URL serves an RSS or Atom feed over HTTP(S).
 
     feedparser also reads a local path or a literal XML document, either of which an email could carry instead of a
-    URL. It names the format of a feed it recognises, such as rss20 or atom10.
+    URL.
     """
-    if urlparse(url).scheme not in {"http", "https"}:
-        logger.warning(f"{url} is not an HTTP(S) URL")
-        return False
-
     try:
-        parsed_feed = fetch_feed(url)
+        if urlparse(url).scheme not in {"http", "https"}:
+            logger.warning(f"{url} is not an HTTP(S) URL")
+            return False
+
+        fetch_feed(url)
     except Exception as e:
         logger.error(f"Error validating feed {url}: {e}")
         return False
 
-    return parsed_feed.get("version", "").startswith(("rss", "atom"))
+    return True
 
 
 def add_feed_to_file(file_path: Path, url: str, category: str | None = None) -> None:
