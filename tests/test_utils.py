@@ -1,6 +1,9 @@
-import sqlite3
+import json
+import os
 from email import message_from_string
 from typing import TYPE_CHECKING, Any
+
+import boto3
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -119,16 +122,15 @@ def create_atom_feed(
 
 def setup_test_env(tmp_path: Path) -> dict[str, str]:
     """Set up test environment directories and return environment variables."""
-    feeds_file = tmp_path / "feeds.txt"
-    state_db = tmp_path / "state.db"
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    feeds_file.write_text("")
-
     return {
-        "MEED_FEEDS_FILE_PATH": str(feeds_file),
-        "MEED_STATE_DB_PATH": str(state_db),
+        "BUCKET_NAME": "meed-test",
+        # The credentials of moto's fake S3, so that credentials in the developer's environment never reach a real
+        # bucket.
+        "AWS_ACCESS_KEY_ID": "testing",
+        "AWS_SECRET_ACCESS_KEY": "testing",
         "MEED_SMTP_HOST": "smtp.test.com",
         "MEED_SMTP_PORT": "465",
         "MEED_SMTP_USER": "test@test.com",
@@ -141,10 +143,32 @@ def setup_test_env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def create_feeds_file(urls: list[str], path: Path) -> Path:
-    """Create a feeds.txt file with the given URLs."""
-    path.write_text("\n".join(urls))
-    return path
+def get_object(key: str) -> str | None:
+    """The text of an object in the test bucket, or None when there is none."""
+    client = boto3.client("s3")
+    try:
+        response = client.get_object(Bucket=os.environ["BUCKET_NAME"], Key=key)
+    except client.exceptions.NoSuchKey:
+        return None
+    return response["Body"].read().decode()
+
+
+def put_object(key: str, text: str) -> None:
+    boto3.client("s3").put_object(Bucket=os.environ["BUCKET_NAME"], Key=key, Body=text.encode())
+
+
+def delete_object(key: str) -> None:
+    boto3.client("s3").delete_object(Bucket=os.environ["BUCKET_NAME"], Key=key)
+
+
+def delete_bucket() -> None:
+    """Delete the test bucket, which must be empty, so that every request to it fails with NoSuchBucket."""
+    boto3.client("s3").delete_bucket(Bucket=os.environ["BUCKET_NAME"])
+
+
+def put_feeds(urls: list[str]) -> None:
+    """Store a feed list with the given URLs."""
+    put_object("feeds.txt", "\n".join(urls))
 
 
 def assert_email_sent(
@@ -189,27 +213,19 @@ def get_email_count(mock_smtp: MagicMock) -> int:
     return int(sendmail_mock.call_count)
 
 
-def query_db(db_path: Path, query: str, params: tuple = ()) -> list:
-    """Execute a SQL query and return all results."""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+def stored_state() -> dict[str, list[str]]:
+    """The state object meed stored, empty when there is none."""
+    text = get_object("state.json")
+    return json.loads(text) if text is not None else {}
 
 
-def seen_entry_ids(db_path: Path, feed_id: str) -> set[str]:
-    """The IDs of the entries of a feed that meed has recorded as seen."""
-    return {row[0] for row in query_db(db_path, "SELECT entry_id FROM seen_entries WHERE feed_id = ?", (feed_id,))}
-
-
-def assert_seen_entries(db_path: Path, feed_id: str, entry_ids: set[str]) -> None:
+def assert_seen_entries(feed_id: str, entry_ids: set[str]) -> None:
     """Assert that a feed is known and that exactly these of its entries are recorded as seen."""
-    rows = query_db(db_path, "SELECT id FROM feeds WHERE id = ?", (feed_id,))
-    assert len(rows) > 0, f"Feed {feed_id} not found in database"
-    seen = seen_entry_ids(db_path, feed_id)
-    assert seen == entry_ids, f"Expected seen entries {entry_ids}, got {seen}"
+    state = stored_state()
+    assert feed_id in state, f"Feed {feed_id} not found in state"
+    seen = state[feed_id]
+    assert len(seen) == len(set(seen)), f"Seen entries {seen} repeat an ID"
+    assert set(seen) == entry_ids, f"Expected seen entries {entry_ids}, got {seen}"
 
 
 def get_email_body(email_str: str) -> str:

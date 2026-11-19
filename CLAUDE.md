@@ -4,8 +4,8 @@ Emails new RSS/Atom feed entries. One module, `meed.py`, run roughly hourly as a
 
 ## Stage
 
-`0.x.y` - beta: in production for its owner. The feed list and the state database on the Fly volume must survive every
-change, so a change to the `feeds` or `seen_entries` table needs a migration.
+`0.x.y` - beta: in production for its owner. The feed list (`feeds.txt`) and the state (`state.json`) live in a Tigris
+bucket and must survive every change, so a change to the state JSON format needs a migration.
 
 ## Decisions
 

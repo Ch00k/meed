@@ -19,15 +19,8 @@ COPY meed.py /app/
 
 ENV PATH=/app/.venv/bin:$PATH
 
-# The volume holding the feed list and the state database is mounted at /data.
-ENV MEED_FEEDS_FILE_PATH=/data/feeds.txt
-ENV MEED_STATE_DB_PATH=/data/state.db
-
-# meed never needs root, and the volume it writes to is the only thing it must own. A mounted volume keeps its own
-# ownership, so seeding it hands it to this user (README.md); /data here serves a run without a volume.
-RUN useradd --create-home --uid 10001 meed \
-    && mkdir -p /data \
-    && chown meed:meed /data
+# meed never needs root: it keeps its feed list and state in a bucket, and writes no file.
+RUN useradd --create-home --uid 10001 meed
 
 USER meed
 

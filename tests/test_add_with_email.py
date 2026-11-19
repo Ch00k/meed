@@ -1,12 +1,11 @@
-import os
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from meed import add_feed_to_file, is_valid_feed, parse_email_body, read_feeds_file
-from tests.test_utils import create_atom_feed, create_rss_feed
+from meed import add_feed, is_valid_feed, parse_email_body, parse_feeds
+from tests.test_utils import create_atom_feed, create_rss_feed, delete_bucket, get_object, put_object
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     import pytest
     from _pytest.monkeypatch import MonkeyPatch
@@ -60,65 +59,44 @@ def test_parse_email_body_multiline_category() -> None:
     assert category == "Blogs"
 
 
-def test_add_feed_to_file_with_category(tmp_path: Path) -> None:
+def test_add_feed_with_category() -> None:
     """Test adding feed with category to file."""
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("# Existing\nhttps://existing.com/feed\n")
+    content = add_feed("# Existing\nhttps://existing.com/feed\n", "https://new.com/feed", "News")
 
-    add_feed_to_file(feeds_file, "https://new.com/feed", "News")
-
-    content = feeds_file.read_text()
     assert "# News" in content
     assert "https://new.com/feed" in content
     assert content.endswith("https://new.com/feed\n")
 
 
-def test_add_feed_to_file_without_category(tmp_path: Path) -> None:
+def test_add_feed_without_category() -> None:
     """Test adding feed without category adds to uncategorized."""
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("# Existing\nhttps://existing.com/feed\n")
+    content = add_feed("# Existing\nhttps://existing.com/feed\n", "https://new.com/feed")
 
-    add_feed_to_file(feeds_file, "https://new.com/feed")
-
-    content = feeds_file.read_text()
     assert "# uncategorized" in content
     assert "https://new.com/feed" in content
 
 
-def test_add_feed_to_file_without_category_reuses_uncategorized(tmp_path: Path) -> None:
+def test_add_feed_without_category_reuses_uncategorized() -> None:
     """Test adding multiple feeds without category reuses uncategorized section."""
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("# uncategorized\nhttps://uncategorized1.com/feed\n")
+    content = add_feed("# uncategorized\nhttps://uncategorized1.com/feed\n", "https://uncategorized2.com/feed")
 
-    add_feed_to_file(feeds_file, "https://uncategorized2.com/feed")
-
-    content = feeds_file.read_text()
     # Should only have one "# uncategorized" comment
     assert content.count("# uncategorized") == 1
     assert "https://uncategorized1.com/feed" in content
     assert "https://uncategorized2.com/feed" in content
 
 
-def test_add_feed_to_file_creates_file(tmp_path: Path) -> None:
-    """Test adding feed creates file if it doesn't exist."""
-    feeds_file = tmp_path / "feeds.txt"
-
-    add_feed_to_file(feeds_file, "https://new.com/feed", "Blogs")
-
-    assert feeds_file.exists()
-    content = feeds_file.read_text()
-    assert "# Blogs" in content
-    assert "https://new.com/feed" in content
+def test_add_feed_to_an_empty_list() -> None:
+    """A feed added to an empty list starts its category."""
+    assert add_feed("", "https://new.com/feed", "Blogs") == "\n\n# Blogs\nhttps://new.com/feed\n"
 
 
-def test_add_feed_to_file_reuses_existing_category(tmp_path: Path) -> None:
+def test_add_feed_reuses_existing_category() -> None:
     """Test adding multiple feeds to same category doesn't duplicate category comment."""
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("# Blogs\nhttps://blog1.com/feed\n\n# News\nhttps://news1.com/feed\n")
+    content = add_feed(
+        "# Blogs\nhttps://blog1.com/feed\n\n# News\nhttps://news1.com/feed\n", "https://blog2.com/feed", "Blogs"
+    )
 
-    add_feed_to_file(feeds_file, "https://blog2.com/feed", "Blogs")
-
-    content = feeds_file.read_text()
     # Should only have one "# Blogs" comment
     assert content.count("# Blogs") == 1
     # Both blog feeds should be present
@@ -132,27 +110,24 @@ def test_add_feed_to_file_reuses_existing_category(tmp_path: Path) -> None:
     assert blog1_index < blog2_index < news_index
 
 
-def test_add_feed_to_file_keeps_the_category_together(tmp_path: Path) -> None:
+def test_add_feed_keeps_the_category_together() -> None:
     """A URL added to a category goes right after its last URL, keeping the blank line between categories."""
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("# Blogs\nhttps://blog1.com/feed\n\n# News\nhttps://news1.com/feed")
+    feeds = "# Blogs\nhttps://blog1.com/feed\n\n# News\nhttps://news1.com/feed"
 
-    add_feed_to_file(feeds_file, "https://blog2.com/feed", "Blogs")
-    add_feed_to_file(feeds_file, "https://news2.com/feed", "News")
+    feeds = add_feed(feeds, "https://blog2.com/feed", "Blogs")
+    feeds = add_feed(feeds, "https://news2.com/feed", "News")
 
-    assert feeds_file.read_text() == (
+    assert feeds == (
         "# Blogs\nhttps://blog1.com/feed\nhttps://blog2.com/feed\n\n# News\nhttps://news1.com/feed\nhttps://news2.com/feed\n"
     )
 
 
-def test_add_feed_to_file_category_at_end(tmp_path: Path) -> None:
+def test_add_feed_category_at_end() -> None:
     """Test adding feed to category that's at the end of file."""
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("# News\nhttps://news1.com/feed\n\n# Blogs\nhttps://blog1.com/feed\n")
+    content = add_feed(
+        "# News\nhttps://news1.com/feed\n\n# Blogs\nhttps://blog1.com/feed\n", "https://blog2.com/feed", "Blogs"
+    )
 
-    add_feed_to_file(feeds_file, "https://blog2.com/feed", "Blogs")
-
-    content = feeds_file.read_text()
     assert content.count("# Blogs") == 1
     assert "https://blog2.com/feed" in content
     # New feed should be after existing blog feed
@@ -211,14 +186,11 @@ def test_is_valid_feed_rejects_an_unreachable_url(caplog: pytest.LogCaptureFixtu
     assert any(f"Error validating feed {url}" in message for message in caplog.messages)
 
 
-def test_process_email_with_valid_feed(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    """Test process_email with a valid feed URL."""
+def test_process_email_with_valid_feed(monkeypatch: MonkeyPatch) -> None:
+    """Test process_email with a valid feed URL, with no feed list in the bucket yet."""
     from unittest.mock import MagicMock
 
     from meed import process_email
-
-    feeds_file = tmp_path / "feeds.txt"
-    monkeypatch.setenv("MEED_FEEDS_FILE_PATH", str(feeds_file))
 
     # Create a mock email message
     mock_msg = MagicMock()
@@ -232,23 +204,17 @@ def test_process_email_with_valid_feed(tmp_path: Path, monkeypatch: MonkeyPatch)
     # Process the email
     process_email(mock_msg)
 
-    # Verify feed was added to file
-    content = feeds_file.read_text()
-    assert "https://example.com/feed" in content
-    assert "# Blogs" in content
+    # Verify feed was added to the feed list
+    assert get_object("feeds.txt") == "\n\n# Blogs\nhttps://example.com/feed\n"
 
 
-def test_process_email_skips_a_feed_already_listed(
-    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A feed already in the feeds file is not added again, under any category, and is not fetched."""
+def test_process_email_skips_a_feed_already_listed(monkeypatch: MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A feed already in the feed list is not added again, under any category, and is not fetched."""
     from unittest.mock import MagicMock
 
     from meed import process_email
 
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("# Blogs\nhttps://example.com/feed\n")
-    monkeypatch.setenv("MEED_FEEDS_FILE_PATH", str(feeds_file))
+    put_object("feeds.txt", "# Blogs\nhttps://example.com/feed\n")
 
     def fail_validation(url: str) -> bool:
         msg = f"{url} was fetched"
@@ -260,19 +226,17 @@ def test_process_email_skips_a_feed_already_listed(
 
     process_email(mock_msg)
 
-    assert feeds_file.read_text() == "# Blogs\nhttps://example.com/feed\n"
-    assert "Feed https://example.com/feed is already in the feeds file" in caplog.messages
+    assert get_object("feeds.txt") == "# Blogs\nhttps://example.com/feed\n"
+    assert "Feed https://example.com/feed is already in the feed list" in caplog.messages
 
 
-def test_process_email_with_invalid_feed(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_process_email_with_invalid_feed(monkeypatch: MonkeyPatch) -> None:
     """Test process_email with an invalid feed URL."""
     from unittest.mock import MagicMock
 
     from meed import process_email
 
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("")
-    monkeypatch.setenv("MEED_FEEDS_FILE_PATH", str(feeds_file))
+    put_object("feeds.txt", "")
 
     # Create a mock email message
     mock_msg = MagicMock()
@@ -286,9 +250,8 @@ def test_process_email_with_invalid_feed(tmp_path: Path, monkeypatch: MonkeyPatc
     # Process the email
     process_email(mock_msg)
 
-    # Verify feed was NOT added to file
-    content = feeds_file.read_text()
-    assert "https://invalid.com/notafeed" not in content
+    # Verify feed was NOT added to the feed list
+    assert get_object("feeds.txt") == ""
 
 
 def test_process_email_with_no_body() -> None:
@@ -307,15 +270,13 @@ def test_process_email_with_no_body() -> None:
     process_email(mock_msg)
 
 
-def test_process_email_with_no_uid(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_process_email_with_no_uid(monkeypatch: MonkeyPatch) -> None:
     """Test process_email with email that has no UID."""
     from unittest.mock import MagicMock
 
     from meed import process_email
 
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("")
-    monkeypatch.setenv("MEED_FEEDS_FILE_PATH", str(feeds_file))
+    put_object("feeds.txt", "")
 
     # Create a mock email message with no UID
     mock_msg = MagicMock()
@@ -330,15 +291,13 @@ def test_process_email_with_no_uid(tmp_path: Path, monkeypatch: MonkeyPatch) -> 
     process_email(mock_msg)
 
 
-def test_process_email_with_empty_url(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_process_email_with_empty_url() -> None:
     """Test process_email with email containing empty lines."""
     from unittest.mock import MagicMock
 
     from meed import process_email
 
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("")
-    monkeypatch.setenv("MEED_FEEDS_FILE_PATH", str(feeds_file))
+    put_object("feeds.txt", "")
 
     # Create a mock email message with whitespace only
     mock_msg = MagicMock()
@@ -350,8 +309,7 @@ def test_process_email_with_empty_url(tmp_path: Path, monkeypatch: MonkeyPatch) 
     process_email(mock_msg)
 
     # Verify nothing was added
-    content = feeds_file.read_text()
-    assert content == ""
+    assert get_object("feeds.txt") == ""
 
 
 def test_check_emails_not_configured(monkeypatch: MonkeyPatch) -> None:
@@ -372,13 +330,13 @@ def test_check_emails_not_configured(monkeypatch: MonkeyPatch) -> None:
     meed.check_emails()
 
 
-def test_check_emails_with_messages(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_check_emails_with_messages(monkeypatch: MonkeyPatch) -> None:
     """Test check_emails with unread messages in mailbox."""
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock, call, patch
 
-    feeds_file = tmp_path / "feeds.txt"
-    feeds_file.write_text("")
-    monkeypatch.setenv("MEED_FEEDS_FILE_PATH", str(feeds_file))
+    from imap_tools import MailMessageFlags
+
+    put_object("feeds.txt", "")
     monkeypatch.setenv("MEED_IMAP_HOST", "imap.test.com")
     monkeypatch.setenv("MEED_IMAP_USER", "test@test.com")
     monkeypatch.setenv("MEED_IMAP_PASSWORD", "testpass")
@@ -410,9 +368,58 @@ def test_check_emails_with_messages(tmp_path: Path, monkeypatch: MonkeyPatch) ->
 
         meed.check_emails()
 
-        # Both feeds were added; fetching the messages marked them as read
-        mock_mailbox.fetch.assert_called_once_with(criteria="UNSEEN")
-        assert read_feeds_file(feeds_file) == ["https://example.com/feed1", "https://example.com/feed2"]
+        # Both feeds were added, and each message was marked as read once handled
+        mock_mailbox.fetch.assert_called_once_with(criteria="UNSEEN", mark_seen=False)
+        assert parse_feeds(get_object("feeds.txt") or "") == ["https://example.com/feed1", "https://example.com/feed2"]
+        assert mock_mailbox.flag.call_args_list == [
+            call("123", MailMessageFlags.SEEN, value=True),
+            call("124", MailMessageFlags.SEEN, value=True),
+        ]
+
+
+def test_check_emails_leaves_messages_it_could_not_handle_unread(monkeypatch: MonkeyPatch) -> None:
+    """When the bucket cannot be reached, no message is marked as read, so the next run handles them all."""
+    from unittest.mock import MagicMock, patch
+
+    import pytest
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setenv("MEED_IMAP_HOST", "imap.test.com")
+    monkeypatch.setenv("MEED_IMAP_USER", "test@test.com")
+    monkeypatch.setenv("MEED_IMAP_PASSWORD", "testpass")
+
+    import meed
+
+    delete_bucket()
+    mock_mailbox = MagicMock()
+    mock_mailbox.fetch.return_value = [
+        MagicMock(uid="123", text="https://example.com/feed1", html=None),
+        MagicMock(uid="124", text="https://example.com/feed2", html=None),
+    ]
+
+    with patch("meed.MailBox") as mock_mailbox_class, patch("meed.is_valid_feed", return_value=True):
+        mock_mailbox_class.return_value.login.return_value.__enter__.return_value = mock_mailbox
+
+        with pytest.raises(ClientError, match="NoSuchBucket"):
+            meed.check_emails()
+
+    mock_mailbox.flag.assert_not_called()
+
+
+def test_process_email_finds_the_category_of_a_list_with_crlf_line_endings(monkeypatch: MonkeyPatch) -> None:
+    """A feed list with Windows line endings gets the feed under its existing heading, and Unix line endings."""
+    from unittest.mock import MagicMock
+
+    from meed import process_email
+
+    put_object("feeds.txt", "# Blogs\r\nhttps://blog1.com/feed\r\n\r\n# News\r\nhttps://news1.com/feed\r\n")
+    monkeypatch.setattr("meed.is_valid_feed", lambda _: True)
+
+    process_email(MagicMock(uid="123", text="https://blog2.com/feed\nBlogs", html=None))
+
+    assert get_object("feeds.txt") == (
+        "# Blogs\nhttps://blog1.com/feed\nhttps://blog2.com/feed\n\n# News\nhttps://news1.com/feed\n"
+    )
 
 
 def test_check_emails_no_unread(monkeypatch: MonkeyPatch) -> None:
@@ -440,7 +447,7 @@ def test_check_emails_no_unread(monkeypatch: MonkeyPatch) -> None:
         meed.check_emails()
 
         # No feed was added
-        assert read_feeds_file(Path(os.environ["MEED_FEEDS_FILE_PATH"])) == []
+        assert get_object("feeds.txt") is None
 
 
 def test_job_handles_check_emails_exception(monkeypatch: MonkeyPatch) -> None:

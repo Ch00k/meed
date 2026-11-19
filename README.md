@@ -2,8 +2,8 @@
 
 Email notifications for RSS/Atom feeds.
 
-**meed** monitors RSS and Atom feeds on a schedule and sends email notifications for new entries, tracking state in a
-SQLite database.
+**meed** monitors RSS and Atom feeds on a schedule and sends email notifications for new entries, keeping its feed list
+and state in an S3-compatible bucket.
 
 ## Features
 
@@ -12,7 +12,7 @@ SQLite database.
 - **Hourly checks**: Runs as a scheduled [Fly.io](https://fly.io) Machine that checks once and exits
 - **Chronological delivery**: New entries are emailed oldest-first to preserve reading order
 - **Robust parsing**: Handles malformed feeds gracefully with intelligent fallbacks
-- **State tracking**: SQLite database prevents duplicate notifications
+- **State tracking**: Every entry seen is recorded, so no entry is emailed twice
 - **HTML emails**: Rich email content with links and summaries
 
 ## Requirements
@@ -24,7 +24,8 @@ SQLite database.
 
 **meed** does one check per run and exits. On Fly.io it runs as a single Machine with an hourly schedule: Fly starts it
 roughly once an hour (at a time of its choosing, not on the hour), and it stops when **meed** exits, so only the seconds
-it runs are billed. The feed list and the state database live on a volume mounted at `/data`.
+it runs are billed. The feed list, `feeds.txt`, and the state, `state.json`, are objects in a
+[Tigris](https://www.tigrisdata.com) bucket, Fly's S3-compatible object storage, so the Machine has no volume.
 
 There is no `fly.toml` on purpose. `fly deploy` manages only Machines that belong to a process group in `fly.toml`, does
 not keep a Machine's schedule, and creates Machines that restart when their process exits. Instead, every release tag
@@ -33,31 +34,44 @@ straight away and then hourly.
 
 ### One-time setup
 
-1. Create the app and the volume, and store the configuration (see Environment Variables below) as secrets. Secrets
+1. Create the app and the bucket, and store the configuration (see Environment Variables below) as secrets. Secrets
    reach a Machine when it starts, so `--stage` is enough: the next scheduled run picks them up.
    ```bash
    fly apps create meed
-   fly volumes create meed_data --app meed --region fra --size 1
+   fly storage create --app meed
    fly secrets set --app meed --stage MEED_SMTP_HOST=... MEED_SMTP_USER=... MEED_SMTP_PASSWORD=... \
        MEED_EMAIL_FROM=... MEED_EMAIL_TO=...
    ```
+   `fly storage create` sets the app secrets `BUCKET_NAME`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY`, which is all meed needs to reach the bucket.
 
-2. Put `feeds.txt` (and, when moving an existing installation, its `state.db`) on the volume, from a temporary Machine.
-   Without a `state.db`, the first run records every feed's current entries and sends nothing.
+2. Turn on snapshots for the bucket (see Backups below), with the [Tigris CLI](https://www.tigrisdata.com/docs/cli/),
+   which signs in with the Fly account:
    ```bash
-   fly machine run . --app meed --region fra --name seed --volume meed_data:/data --restart no sleep 900
+   npm install -g @tigrisdata/cli
+   tigris login
+   tigris buckets enable-snapshots <bucket>
    ```
-   flyctl finds a Machine by its ID only, not by its name: take the ID from the output above (or `fly machine list
-   --app meed`).
-   ```bash
-   fly ssh sftp put feeds.txt /data/feeds.txt --app meed --machine <seed machine id>
-   fly ssh sftp put state.db /data/state.db --app meed --machine <seed machine id>
-   fly ssh console --app meed --machine <seed machine id> -C "chown -R meed:meed /data"
-   fly machine destroy <seed machine id> --app meed --force
-   ```
-   meed runs as the user `meed`, and SFTP writes the files as root, hence the `chown`.
 
-3. Give CI a deploy token, then release (below): the first release's `deploy` job creates the scheduled Machine.
+3. When moving an existing installation, which kept its state in a SQLite database, `state.db`: stop it for good, so
+   that it sends nothing more, copy its `feeds.txt` and `state.db` here, and convert the database right before the
+   first release:
+   ```bash
+   uv run python -m scripts.convert_state state.db state.json
+   ```
+   A feed's seen entries carry over. A feed with none but the newest entry it emailed is fetched: that entry and every
+   entry the feed lists after it count as seen, so only entries published since are sent. When that entry has left the
+   feed, all the feed's entries count as seen. A feed that cannot be fetched is left out, with a message, and its first
+   check records its entries and sends none.
+
+4. Upload `feeds.txt`, and `state.json` when there is one. Without a `state.json`, the first run records every feed's
+   current entries and sends nothing.
+   ```bash
+   tigris cp feeds.txt t3://<bucket>/feeds.txt
+   tigris cp state.json t3://<bucket>/state.json
+   ```
+
+5. Give CI a deploy token, then release (below): the first release's `deploy` job creates the scheduled Machine.
    ```bash
    fly tokens create deploy --app meed | gh secret set FLY_API_TOKEN
    ```
@@ -76,7 +90,26 @@ git tag 0.4.0
 git push origin main 0.4.0
 ```
 
-Fly snapshots the volume daily and keeps the snapshots for 5 days.
+### Backups
+
+Tigris keeps the history of a bucket with snapshots enabled: every write is kept, so any earlier `feeds.txt` or
+`state.json` can be read back, by time or by version, and restored by uploading it again:
+```bash
+tigris objects list-versions <bucket> --prefix state.json
+tigris objects get <bucket> state.json --version-id <version id> --output state.json
+```
+A bucket from `fly storage create` has snapshots off. Tigris's CLI reference has `tigris buckets enable-snapshots` turn
+them on for an existing bucket, while Fly's and some of Tigris's own docs say snapshots can only be enabled when a bucket
+is created (`tigris buckets create <bucket> --enable-snapshots`). Without snapshots, an overwritten object is gone.
+
+### Editing the feed list
+
+meed reads `feeds.txt` from the bucket on every run, and adds feeds sent by email to it. To edit it by hand, download it,
+edit it and upload it again between runs:
+```bash
+tigris cp t3://<bucket>/feeds.txt feeds.txt
+tigris cp feeds.txt t3://<bucket>/feeds.txt
+```
 
 ## Configuration
 
@@ -98,12 +131,14 @@ Fly snapshots the volume daily and keeps the snapshots for 5 days.
 | `MEED_IMAP_PASSWORD` | _(none)_ | Optional IMAP password or app-specific password |
 | `MEED_IMAP_MAILBOX` | `INBOX.meed` | IMAP mailbox/folder name to monitor for feed addition emails |
 | `MEED_SENTRY_DSN` | _(none)_ | Optional Sentry DSN for error tracking |
-| `MEED_FEEDS_FILE_PATH` | `feeds.txt` | Feed list; the Docker image sets it to `/data/feeds.txt` |
-| `MEED_STATE_DB_PATH` | `state.db` | State database; the Docker image sets it to `/data/state.db` |
+| `BUCKET_NAME` | _(none, required)_ | Bucket holding `feeds.txt` and `state.json`; set by `fly storage create` |
+| `AWS_ENDPOINT_URL_S3` | _(AWS S3)_ | The bucket's S3 endpoint; set by `fly storage create` |
+| `AWS_ACCESS_KEY_ID` | _(none)_ | Access key for the bucket; set by `fly storage create` |
+| `AWS_SECRET_ACCESS_KEY` | _(none)_ | Secret key for the bucket; set by `fly storage create` |
 
 ### Feed Configuration
 
-Create a `feeds.txt` file with one feed URL per line. Lines starting with `#` are treated as comments:
+The feed list, `feeds.txt` in the bucket, has one feed URL per line. Lines starting with `#` are treated as comments:
 
 ```
 # Blogs
@@ -120,7 +155,7 @@ https://changelog.com/podcast/feed
 ### Adding Feeds via Email (Optional)
 
 If you configure IMAP credentials, you can add feeds by sending an email to a designated mailbox. **meed** will check
-this mailbox on each run, validate the feed URLs, and automatically add them to `feeds.txt`.
+this mailbox on each run, validate the feed URLs, and automatically add them to `feeds.txt` in the bucket.
 
 **Email format:**
 ```
@@ -140,8 +175,12 @@ and marked as read.
 2. **Subsequent runs**: every entry **meed** has not seen before is new, whatever its date and wherever the feed
    lists it.
 3. **Email delivery**: New entries are sent in chronological order (oldest first) to preserve reading order.
-4. **State updates**: Each entry is recorded as seen as soon as its email is sent, so a run that fails partway sends
-   nothing twice.
+4. **State updates**: Each entry is recorded as seen as soon as its email is sent, by writing the state back to the
+   bucket, so a run that fails partway sends nothing twice. The exception is an entry whose email went out but whose
+   updated state was never stored, because the write failed even after boto3's retries or the run stopped before it:
+   the next run sends it again.
+5. **Failures**: A feed that cannot be fetched or emailed is logged and skipped. A feed list or state that cannot be
+   read from the bucket fails the run.
 
 ## Development
 
@@ -155,7 +194,7 @@ The test suite includes comprehensive tests covering:
 - New entry detection and ordering
 - Feed format compatibility (RSS 2.0, Atom 1.0)
 - Error handling (network errors, SMTP failures, malformed feeds)
-- State persistence and database integrity
+- State persistence in the bucket (a fake S3, from moto)
 - Unicode and HTML content handling
 - Email parsing and feed addition via IMAP
 
