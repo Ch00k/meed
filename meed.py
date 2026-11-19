@@ -2,6 +2,7 @@ import logging
 import smtplib
 import socket
 import sqlite3
+import urllib.error
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
@@ -198,6 +199,11 @@ class Feed(BaseModel):
     @classmethod
     def from_url(cls, url: str) -> "Feed":
         parsed_feed = feedparser.parse(url, agent=USER_AGENT)
+
+        # feedparser reports a failed fetch as an empty feed. Taken as one, a new feed would get state with no last
+        # entry, and its first successful fetch would email the whole backlog.
+        if isinstance(parsed_feed.get("bozo_exception"), urllib.error.URLError):
+            raise parsed_feed["bozo_exception"]
 
         if "feed" in parsed_feed:
             logger.info(f"Replacing feed ID with URL for feed {url}")

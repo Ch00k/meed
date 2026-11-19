@@ -1265,6 +1265,22 @@ def test_job_function_exception_handling(monkeypatch: pytest.MonkeyPatch) -> Non
     job()
 
 
+def test_unreachable_new_feed_gets_no_state(mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
+    """A new feed that cannot be fetched gets no state, so its first successful fetch only records its entries."""
+    from meed import main
+
+    # Nothing listens on port 1, so the connection is refused.
+    feed_url = "http://127.0.0.1:1/feed.xml"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+
+    assert_no_emails_sent(mock_smtp)
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    assert query_db(state_db, "SELECT COUNT(*) FROM feeds WHERE id = ?", (feed_url,))[0][0] == 0
+    assert any(f"Error fetching or parsing feed {feed_url}" in record.message for record in caplog.records)
+
+
 def test_main_sets_network_timeout() -> None:
     """main() bounds every network operation, so a stalled connection cannot keep a run going."""
     import socket

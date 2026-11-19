@@ -105,13 +105,18 @@ jobs:
 
       # The new Machine runs one check straight away. One that never stops holds the schedule, and the bill, forever,
       # and one that fails would fail every hour. With --restart no, a crash also ends in `stopped`, so read how it
-      # exited. Fly omits zero values from the exit event, and records it in one of two places.
+      # exited. Polled rather than `flyctl machine wait`, which gives up after a few minutes whatever --wait-timeout
+      # says. A run still going after 15 minutes has no exit event, which fails the check. Fly omits zero values from
+      # the exit event, records it in one of two places, and reports "no signal" as -1.
       - name: Check the first run
         run: |
-          machine=$(flyctl machine list --app meed --json | jq -r '.[0].id')
-          flyctl machine wait "$machine" --app meed --state stopped --wait-timeout 15m
-          flyctl machine status "$machine" --app meed
-          flyctl machine list --app meed --json | jq -e '
+          for _ in $(seq 90); do
+            [ "$(flyctl machine list --app meed --json | jq -r '.[0].state')" = stopped ] && break
+            sleep 10
+          done
+          flyctl machine list --app meed --json > machines.json
+          jq 'first(.[0].events[] | select(.type == "exit"))' machines.json
+          jq -e '
             first(.[0].events[] | select(.type == "exit")).request
             | (.MonitorEvent.exit_event // .exit_event)
-            | . != null and (.exit_code // 0) == 0 and (.signal // 0) == 0 and (.oom_killed // false | not)'
+            | . != null and (.exit_code // 0) == 0 and (.signal // 0) <= 0 and (.oom_killed // false | not)' machines.json
