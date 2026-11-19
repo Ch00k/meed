@@ -1,10 +1,9 @@
+import json
 import logging
 import smtplib
 import socket
-import sqlite3
 import tomllib
 import urllib.error
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from email.mime.text import MIMEText
 from email.utils import formataddr
@@ -12,16 +11,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import boto3
 import environs
 import feedparser
 import sentry_sdk
+from botocore.config import Config
 from imap_tools import MailBox
 from json_log_formatter import BUILTIN_ATTRS, JSONFormatter
 from pydantic import BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
-
+    from botocore.client import BaseClient
     from imap_tools.message import MailMessage
 
 BUILTIN_ATTRS.add("taskName")
@@ -62,8 +62,13 @@ class FeedFetchError(Exception):
 
 env = environs.Env()
 
-FEEDS_FILE_PATH = env.path("MEED_FEEDS_FILE_PATH", Path("feeds.txt"))
-STATE_DB_PATH = env.path("MEED_STATE_DB_PATH", Path("state.db"))
+# The bucket holding the feed list and the state. `fly storage create` sets BUCKET_NAME, and the AWS_* variables that
+# boto3 reads by itself: the credentials and the endpoint, AWS_ENDPOINT_URL_S3.
+BUCKET_NAME = env.str("BUCKET_NAME", "meed")
+FEEDS_KEY = "feeds.txt"
+# For each feed meed knows, the IDs of every entry it has seen: emailed, or already in the feed when meed first checked
+# it. A feed with no seen entries was empty when first checked.
+STATE_KEY = "state.json"
 
 SMTP_HOST = env.str("MEED_SMTP_HOST", "127.0.0.1")
 SMTP_PORT = env.int("MEED_SMTP_PORT", 465)
@@ -81,25 +86,9 @@ IMAP_MAILBOX = env.str("MEED_IMAP_MAILBOX", "INBOX.meed")
 
 SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 
-# Seconds a feed fetch, SMTP or IMAP connection may stall. Without a limit, one stalled connection keeps the run,
-# and the Machine it runs on, going forever.
+# Seconds a feed fetch, SMTP, IMAP or bucket connection may stall. Without a limit, one stalled connection keeps the
+# run, and the Machine it runs on, going forever.
 NETWORK_TIMEOUT = 60
-
-# A feed's row says meed knows it. last_entry_id is the newest entry the feed listed at the end of the last run that
-# completed: what meed went by before it recorded every entry it has seen, kept up so that an earlier release can still
-# run on this database. After a run that failed partway it lags behind the entries sent, which such a release would
-# send again.
-SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
-# Every entry of a feed meed has seen: emailed, or already in the feed when meed first checked it.
-SQL_CREATE_SEEN_TABLE = (
-    "CREATE TABLE IF NOT EXISTS seen_entries (feed_id TEXT NOT NULL, entry_id TEXT NOT NULL, "
-    "PRIMARY KEY (feed_id, entry_id))"
-)
-SQL_GET_STATE = "SELECT last_entry_id FROM feeds WHERE id = ?"
-SQL_CREATE_STATE = "INSERT INTO feeds (id, last_checked_at, last_entry_id) VALUES (?, datetime('now'), ?)"
-SQL_UPDATE_STATE = "UPDATE feeds SET last_checked_at = datetime('now'), last_entry_id = ? WHERE id = ?"
-SQL_GET_SEEN = "SELECT entry_id FROM seen_entries WHERE feed_id = ?"
-SQL_ADD_SEEN = "INSERT OR IGNORE INTO seen_entries (feed_id, entry_id) VALUES (?, ?)"
 
 
 # meed is not installed as a package, so there is no package metadata to read its version from.
@@ -109,15 +98,44 @@ VERSION = tomllib.loads(Path(__file__).with_name("pyproject.toml").read_text())[
 USER_AGENT = f"meed/{VERSION} (+https://github.com/Ch00k/meed)"
 
 
-@contextmanager
-def get_db_cursor() -> Generator[sqlite3.Cursor]:
-    conn = sqlite3.connect(STATE_DB_PATH)
-    cursor = conn.cursor()
+def s3_client() -> BaseClient:
+    # Tigris serves a bucket created since February 2025 only at a host name of its own, which boto3 uses only when
+    # asked to: with an endpoint URL configured, it otherwise puts the bucket in the path.
+    config = Config(s3={"addressing_style": "virtual"}, connect_timeout=NETWORK_TIMEOUT, read_timeout=NETWORK_TIMEOUT)
+    return boto3.client("s3", config=config)
+
+
+def read_object(key: str) -> str | None:
+    """The text of an object in the bucket, or None when there is no such object."""
+    client = s3_client()
     try:
-        yield cursor
-        conn.commit()
-    finally:
-        conn.close()
+        response = client.get_object(Bucket=BUCKET_NAME, Key=key)
+    except client.exceptions.NoSuchKey:
+        return None
+
+    return response["Body"].read().decode()
+
+
+def write_object(key: str, text: str) -> None:
+    s3_client().put_object(Bucket=BUCKET_NAME, Key=key, Body=text.encode())
+
+
+def read_state() -> dict[str, set[str]]:
+    """Every feed meed knows, with the IDs of its entries seen. Without a state object, meed knows no feed."""
+    text = read_object(STATE_KEY)
+    if text is None:
+        logger.warning(f"State object {STATE_KEY} does not exist, every feed is new")
+        return {}
+
+    return {feed_id: set(entry_ids) for feed_id, entry_ids in json.loads(text).items()}
+
+
+def format_state(state: dict[str, set[str]]) -> str:
+    return json.dumps({feed_id: sorted(entry_ids) for feed_id, entry_ids in state.items()}, indent=2, sort_keys=True)
+
+
+def write_state(state: dict[str, set[str]]) -> None:
+    write_object(STATE_KEY, format_state(state))
 
 
 class FeedEntry(BaseModel):
@@ -240,18 +258,17 @@ class Feed(BaseModel):
 
         return new_entries
 
-    def process(self) -> None:
-        if not self.is_known():
+    def process(self, state: dict[str, set[str]]) -> None:
+        """Email the feed's new entries, recording each in state, which is written back after every change."""
+        seen = state.get(self.metadata.id)
+        if seen is None:
+            # Every entry the feed has now counts as seen: only entries published from here on are new.
             logger.info(f"Feed {self.metadata.title} is new, creating state")
-            self.create_state()
+            state[self.metadata.id] = {entry.id for entry in self.entries}
+            write_state(state)
             return
 
         logger.info(f"Feed {self.metadata.title} is known, checking for new entries")
-
-        seen = self.get_seen_entry_ids()
-        last_entry_id = self.get_last_entry_id()
-        if not seen and last_entry_id is not None:
-            seen = self.convert_last_entry_id(last_entry_id)
 
         new_entries = self.get_new_entries(seen)
 
@@ -264,83 +281,22 @@ class Feed(BaseModel):
         for entry in new_entries:
             logger.info(f"Sending notification for entry {entry.title} ({entry.link})")
             entry.send_notification(self.metadata.title)
-            self.record_sent(entry.id)
-
-        if self.entries:
-            self.update_state(self.entries[0].id)
-
-    def get_state(self) -> tuple[str | None] | None:
-        """The feed's stored row, holding its last entry ID, or None for a feed with no state yet."""
-        with get_db_cursor() as cursor:
-            logger.debug("Executing SQL: %s with params (%s)", SQL_GET_STATE, self.metadata.id)
-            cursor.execute(SQL_GET_STATE, (self.metadata.id,))
-            row = cursor.fetchone()
-
-        logger.debug("Fetched state from DB: %s", row)
-        return row
-
-    def is_known(self) -> bool:
-        return self.get_state() is not None
-
-    def get_last_entry_id(self) -> str | None:
-        row = self.get_state()
-        return row[0] if row else None
-
-    def get_seen_entry_ids(self) -> set[str]:
-        with get_db_cursor() as cursor:
-            cursor.execute(SQL_GET_SEEN, (self.metadata.id,))
-            return {row[0] for row in cursor.fetchall()}
-
-    def record_seen(self, cursor: sqlite3.Cursor, entry_ids: list[str]) -> None:
-        logger.debug("Recording entries %s of feed %s as seen", entry_ids, self.metadata.id)
-        cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry_id) for entry_id in entry_ids])
-
-    def create_state(self) -> None:
-        """Record the feed, with every entry it has now as seen: only entries published from here on are new."""
-        newest_entry = self.entries[0].id if self.entries else None
-        with get_db_cursor() as cursor:
-            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_CREATE_STATE, self.metadata.id, newest_entry)
-            cursor.execute(SQL_CREATE_STATE, (self.metadata.id, newest_entry))
-            self.record_seen(cursor, [entry.id for entry in self.entries])
-
-    def record_sent(self, entry_id: str) -> None:
-        """Record an entry whose email was sent as seen."""
-        with get_db_cursor() as cursor:
-            self.record_seen(cursor, [entry_id])
-
-    def update_state(self, last_entry_id: str) -> None:
-        with get_db_cursor() as cursor:
-            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_UPDATE_STATE, last_entry_id, self.metadata.id)
-            cursor.execute(SQL_UPDATE_STATE, (last_entry_id, self.metadata.id))
-
-    def convert_last_entry_id(self, last_entry_id: str) -> set[str]:
-        """Turn the last entry sent, all a feed's state held before seen entries, into seen entries, and return them.
-
-        That entry and every entry the feed lists after it count as seen. When it has left the feed, which entries
-        are new cannot be told, so all of them count as seen and none is sent; it stays seen should it come back.
-        """
-        entry_ids = [entry.id for entry in self.entries]
-        if last_entry_id in entry_ids:
-            seen = entry_ids[entry_ids.index(last_entry_id) :]
-        else:
-            logger.warning(f"Last sent entry {last_entry_id} is no longer in feed {self.metadata.title}")
-            seen = [last_entry_id, *entry_ids]
-
-        logger.info(f"Recording {len(seen)} entries of feed {self.metadata.title} as seen, up to {last_entry_id}")
-        with get_db_cursor() as cursor:
-            self.record_seen(cursor, seen)
-
-        return set(seen)
+            seen.add(entry.id)
+            write_state(state)
 
 
-def read_feeds_file(file_path: Path) -> list[str]:
-    if not file_path.exists():
-        logger.warning(f"Feeds file {file_path} does not exist.")
-        return []
+def read_feeds() -> str:
+    """The feed list, empty when there is none."""
+    text = read_object(FEEDS_KEY)
+    if text is None:
+        logger.warning(f"Feed list {FEEDS_KEY} does not exist")
+        return ""
 
-    with Path.open(file_path) as f:
-        lines = [line.strip() for line in f]
+    return text
 
+
+def parse_feeds(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines()]
     return [line for line in lines if line and not line.startswith("#")]
 
 
@@ -409,19 +365,14 @@ def is_valid_feed(url: str) -> bool:
     return True
 
 
-def add_feed_to_file(file_path: Path, url: str, category: str | None = None) -> None:
-    """Append a feed URL to the feeds file, with optional category comment.
+def add_feed(feeds: str, url: str, category: str | None = None) -> str:
+    """Add a feed URL to the feed list, with optional category comment, and return the list.
 
-    If category is provided and already exists in the file, the URL is added after
+    If category is provided and already exists in the list, the URL is added after
     the last URL in that category. If the category doesn't exist, a new category
     section is created. If no category is provided, the URL is added to "uncategorized".
     """
-    # Read existing file content
-    if not file_path.exists():
-        file_path.touch()
-
-    with Path.open(file_path) as f:
-        lines = f.readlines()
+    lines = feeds.splitlines(keepends=True)
 
     # Default to "uncategorized" if no category provided
     if not category:
@@ -438,26 +389,22 @@ def add_feed_to_file(file_path: Path, url: str, category: str | None = None) -> 
 
     if category_index == -1:
         # Category doesn't exist - add new section at end
-        with Path.open(file_path, "a") as f:
-            f.write(f"\n\n{category_comment}{url}\n")
-    else:
-        # Category exists - insert after the last URL in it, before the blank line or comment that ends it
-        insert_index = category_index + 1
-        for i in range(category_index + 1, len(lines)):
-            if lines[i].startswith("#"):
-                break
-            if lines[i].strip():
-                insert_index = i + 1
+        return f"{feeds}\n\n{category_comment}{url}\n"
 
-        # The line before may be the file's last, without a line break of its own
-        if not lines[insert_index - 1].endswith("\n"):
-            lines[insert_index - 1] += "\n"
+    # Category exists - insert after the last URL in it, before the blank line or comment that ends it
+    insert_index = category_index + 1
+    for i in range(category_index + 1, len(lines)):
+        if lines[i].startswith("#"):
+            break
+        if lines[i].strip():
+            insert_index = i + 1
 
-        lines.insert(insert_index, f"{url}\n")
+    # The line before may be the list's last, without a line break of its own
+    if not lines[insert_index - 1].endswith("\n"):
+        lines[insert_index - 1] += "\n"
 
-        # Write back the entire file
-        with Path.open(file_path, "w") as f:
-            f.writelines(lines)
+    lines.insert(insert_index, f"{url}\n")
+    return "".join(lines)
 
 
 def process_email(msg: MailMessage) -> None:
@@ -476,20 +423,21 @@ def process_email(msg: MailMessage) -> None:
         logger.warning(f"Email {msg.uid} has no valid URL")
         return
 
-    if url in read_feeds_file(FEEDS_FILE_PATH):
-        logger.info(f"Feed {url} is already in the feeds file")
+    feeds = read_feeds()
+    if url in parse_feeds(feeds):
+        logger.info(f"Feed {url} is already in the feed list")
         return
 
     if not is_valid_feed(url):
         logger.warning(f"URL {url} is not a valid feed")
         return
 
-    logger.info(f"Adding feed {url} with category '{category}' to feeds file")
-    add_feed_to_file(FEEDS_FILE_PATH, url, category)
+    logger.info(f"Adding feed {url} with category '{category}' to the feed list")
+    write_object(FEEDS_KEY, add_feed(feeds, url, category))
 
 
 def check_emails() -> None:
-    """Check IMAP mailbox for new feed URLs and add them to feeds file."""
+    """Check IMAP mailbox for new feed URLs and add them to the feed list."""
     if not IMAP_HOST or not IMAP_USER or not IMAP_PASSWORD:
         logger.warning("IMAP not configured, skipping email check")
         return
@@ -507,14 +455,9 @@ def check_emails() -> None:
             process_email(msg)
 
 
-def create_state_table() -> None:
-    with get_db_cursor() as cursor:
-        cursor.execute(SQL_CREATE_STATE_TABLE)
-        cursor.execute(SQL_CREATE_SEEN_TABLE)
-
-
 def check_feeds() -> None:
-    feed_urls = read_feeds_file(FEEDS_FILE_PATH)
+    feed_urls = parse_feeds(read_feeds())
+    state = read_state()
 
     for feed_url in feed_urls:
         logger.info(f"Processing feed {feed_url}")
@@ -528,7 +471,7 @@ def check_feeds() -> None:
         logger.info(f"Feed title: {feed.metadata.title}")
 
         try:
-            feed.process()
+            feed.process(state)
         except Exception as e:
             logger.error(f"Error processing feed {feed.metadata.title}: {e}")
             sentry_sdk.capture_exception(e)
@@ -555,7 +498,6 @@ def main() -> None:
     logger.info(f"Using User-Agent: {USER_AGENT}")
     # feedparser, smtplib and imaplib open their sockets without a timeout of their own, so they use this one.
     socket.setdefaulttimeout(NETWORK_TIMEOUT)
-    create_state_table()
     job()
 
 
@@ -564,9 +506,12 @@ if __name__ == "__main__":
     handler = logging.StreamHandler()
     handler.setFormatter(MeedJSONFormatter())
 
+    # meed's own debug messages, and the other libraries' from INFO up: botocore's debug messages carry every
+    # request and response.
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.INFO)
     root_logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
 
     if SENTRY_DSN:
         sentry_sdk.init(dsn=SENTRY_DSN)

@@ -7,7 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
+from moto import mock_aws
 
 from tests.test_utils import setup_test_env
 
@@ -19,17 +21,22 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def test_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
-    """Set up test environment with temporary directories and environment variables."""
+def test_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> Generator[Path]:
+    """Set up test environment with temporary directories, environment variables and an empty bucket in a fake S3."""
     env_vars = setup_test_env(tmp_path)
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
+    # moto fakes S3 at AWS's own endpoint only: a request to any other goes out over the network.
+    for key in ("AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL", "AWS_PROFILE", "AWS_SESSION_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
 
     # Force reload of meed module to pick up new environment variables
     if "meed" in sys.modules:
         del sys.modules["meed"]
 
-    return tmp_path
+    with mock_aws():
+        boto3.client("s3").create_bucket(Bucket=env_vars["BUCKET_NAME"])
+        yield tmp_path
 
 
 @pytest.fixture
