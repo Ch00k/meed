@@ -53,14 +53,9 @@ straight away and then hourly.
    tigris buckets enable-snapshots <bucket>
    ```
 
-3. Upload `feeds.txt`, and, when moving an existing installation, its state. Without a `state.json`, the first run
-   records every feed's current entries and sends nothing.
-   ```bash
-   tigris cp feeds.txt t3://<bucket>/feeds.txt
-   tigris cp state.json t3://<bucket>/state.json
-   ```
-   An earlier release kept its state in a SQLite database, `state.db`. Stop that installation, so that it sends nothing
-   more, and convert its `state.db` right before the first release here:
+3. When moving an existing installation, which kept its state in a SQLite database, `state.db`: stop it for good, so
+   that it sends nothing more, copy its `feeds.txt` and `state.db` here, and convert the database right before the
+   first release:
    ```bash
    uv run python -m scripts.convert_state state.db state.json
    ```
@@ -69,7 +64,14 @@ straight away and then hourly.
    feed, all the feed's entries count as seen. A feed that cannot be fetched is left out, with a message, and its first
    check records its entries and sends none.
 
-4. Give CI a deploy token, then release (below): the first release's `deploy` job creates the scheduled Machine.
+4. Upload `feeds.txt`, and `state.json` when there is one. Without a `state.json`, the first run records every feed's
+   current entries and sends nothing.
+   ```bash
+   tigris cp feeds.txt t3://<bucket>/feeds.txt
+   tigris cp state.json t3://<bucket>/state.json
+   ```
+
+5. Give CI a deploy token, then release (below): the first release's `deploy` job creates the scheduled Machine.
    ```bash
    fly tokens create deploy --app meed | gh secret set FLY_API_TOKEN
    ```
@@ -129,7 +131,7 @@ tigris cp feeds.txt t3://<bucket>/feeds.txt
 | `MEED_IMAP_PASSWORD` | _(none)_ | Optional IMAP password or app-specific password |
 | `MEED_IMAP_MAILBOX` | `INBOX.meed` | IMAP mailbox/folder name to monitor for feed addition emails |
 | `MEED_SENTRY_DSN` | _(none)_ | Optional Sentry DSN for error tracking |
-| `BUCKET_NAME` | `meed` | Bucket holding `feeds.txt` and `state.json`; set by `fly storage create` |
+| `BUCKET_NAME` | _(none, required)_ | Bucket holding `feeds.txt` and `state.json`; set by `fly storage create` |
 | `AWS_ENDPOINT_URL_S3` | _(AWS S3)_ | The bucket's S3 endpoint; set by `fly storage create` |
 | `AWS_ACCESS_KEY_ID` | _(none)_ | Access key for the bucket; set by `fly storage create` |
 | `AWS_SECRET_ACCESS_KEY` | _(none)_ | Secret key for the bucket; set by `fly storage create` |
@@ -173,8 +175,12 @@ and marked as read.
 2. **Subsequent runs**: every entry **meed** has not seen before is new, whatever its date and wherever the feed
    lists it.
 3. **Email delivery**: New entries are sent in chronological order (oldest first) to preserve reading order.
-4. **State updates**: Each entry is recorded as seen as soon as its email is sent, so a run that fails partway sends
-   nothing twice.
+4. **State updates**: Each entry is recorded as seen as soon as its email is sent, by writing the state back to the
+   bucket, so a run that fails partway sends nothing twice. The one exception is an entry whose email went out but
+   whose state write failed even after boto3's retries, and that no later write in the run saved: the next run sends
+   it again.
+5. **Failures**: A feed that cannot be fetched or emailed is logged and skipped. A feed list or state that cannot be
+   read from the bucket fails the run.
 
 ## Development
 

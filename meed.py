@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import smtplib
@@ -16,7 +17,7 @@ import environs
 import feedparser
 import sentry_sdk
 from botocore.config import Config
-from imap_tools import MailBox
+from imap_tools import MailBox, MailMessageFlags
 from json_log_formatter import BUILTIN_ATTRS, JSONFormatter
 from pydantic import BaseModel, Field, model_validator
 
@@ -63,8 +64,9 @@ class FeedFetchError(Exception):
 env = environs.Env()
 
 # The bucket holding the feed list and the state. `fly storage create` sets BUCKET_NAME, and the AWS_* variables that
-# boto3 reads by itself: the credentials and the endpoint, AWS_ENDPOINT_URL_S3.
-BUCKET_NAME = env.str("BUCKET_NAME", "meed")
+# boto3 reads by itself: the credentials and the endpoint, AWS_ENDPOINT_URL_S3. A run needs BUCKET_NAME; importing meed
+# does not, which lets scripts/convert_state.py use it without a bucket.
+BUCKET_NAME = env.str("BUCKET_NAME", None)
 FEEDS_KEY = "feeds.txt"
 # For each feed meed knows, the IDs of every entry it has seen: emailed, or already in the feed when meed first checked
 # it. A feed with no seen entries was empty when first checked.
@@ -98,6 +100,7 @@ VERSION = tomllib.loads(Path(__file__).with_name("pyproject.toml").read_text())[
 USER_AGENT = f"meed/{VERSION} (+https://github.com/Ch00k/meed)"
 
 
+@functools.cache
 def s3_client() -> BaseClient:
     # Tigris serves a bucket created since February 2025 only at a host name of its own, which boto3 uses only when
     # asked to: with an endpoint URL configured, it otherwise puts the bucket in the path.
@@ -138,6 +141,13 @@ def write_state(state: dict[str, set[str]]) -> None:
     write_object(STATE_KEY, format_state(state))
 
 
+def title_entry_id(title: str, published: datetime) -> str:
+    """The ID of an entry with neither an ID nor a link. A title alone repeats, as a daily post's does: the date tells
+    such entries apart.
+    """
+    return f"{title} {published:%Y-%m-%dT%H:%M:%SZ}"
+
+
 class FeedEntry(BaseModel):
     id: str
     title: str
@@ -165,8 +175,7 @@ class FeedEntry(BaseModel):
                 value["id"] = value["link"]
             elif value.get("title"):
                 logger.warning("Using title and date as ID")
-                # A title alone repeats, as a daily post's does: the date tells such entries apart.
-                value["id"] = f"{value['title']} {value['published']:%Y-%m-%dT%H:%M:%SZ}"
+                value["id"] = title_entry_id(value["title"], value["published"])
             else:
                 raise InvalidFeedEntryError("FeedEntry must have either ID, link, or title")
 
@@ -286,13 +295,14 @@ class Feed(BaseModel):
 
 
 def read_feeds() -> str:
-    """The feed list, empty when there is none."""
+    """The feed list, with Unix line endings, empty when there is none."""
     text = read_object(FEEDS_KEY)
     if text is None:
         logger.warning(f"Feed list {FEEDS_KEY} does not exist")
         return ""
 
-    return text
+    # A list edited on Windows has CRLF line endings, which would keep add_feed from finding its category headings.
+    return text.replace("\r\n", "\n")
 
 
 def parse_feeds(text: str) -> list[str]:
@@ -445,14 +455,17 @@ def check_emails() -> None:
     with MailBox(host=IMAP_HOST, port=IMAP_PORT).login(IMAP_USER, IMAP_PASSWORD) as mailbox:
         mailbox.folder.set(IMAP_MAILBOX)
 
-        # Fetching a message marks it as read.
-        messages = list(mailbox.fetch(criteria="UNSEEN"))
+        # A message is marked as read once handled, so that one a failure, such as an unreachable bucket, keeps from
+        # being handled is read again on the next run.
+        messages = list(mailbox.fetch(criteria="UNSEEN", mark_seen=False))
         if not messages:
             logger.debug("No unread emails found")
             return
 
         for msg in messages:
             process_email(msg)
+            if msg.uid is not None:
+                mailbox.flag(msg.uid, MailMessageFlags.SEEN, value=True)
 
 
 def check_feeds() -> None:
@@ -485,15 +498,17 @@ def job() -> None:
         logger.error(f"Error checking IMAP emails: {e}")
         sentry_sdk.capture_exception(e)
 
-    try:
-        check_feeds()
-    except Exception as e:
-        logger.error(f"Error checking feeds: {e}")
-        sentry_sdk.capture_exception(e)
+    # check_feeds handles each feed's errors. What is left, failing to read the feed list or the state from the bucket,
+    # fails the run, as a misconfigured bucket must: no feed can be checked.
+    check_feeds()
 
 
 def main() -> None:
     """Run one check and return. meed does not schedule itself: whatever starts it decides how often."""
+    if BUCKET_NAME is None:
+        msg = "BUCKET_NAME is not set: it names the bucket holding the feed list and the state"
+        raise RuntimeError(msg)
+
     logger.info("Starting meed...")
     logger.info(f"Using User-Agent: {USER_AGENT}")
     # feedparser, smtplib and imaplib open their sockets without a timeout of their own, so they use this one.

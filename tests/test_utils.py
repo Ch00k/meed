@@ -161,6 +161,11 @@ def delete_object(key: str) -> None:
     boto3.client("s3").delete_object(Bucket=os.environ["BUCKET_NAME"], Key=key)
 
 
+def delete_bucket() -> None:
+    """Delete the test bucket, which must be empty, so that every request to it fails with NoSuchBucket."""
+    boto3.client("s3").delete_bucket(Bucket=os.environ["BUCKET_NAME"])
+
+
 def put_feeds(urls: list[str]) -> None:
     """Store a feed list with the given URLs."""
     put_object("feeds.txt", "\n".join(urls))

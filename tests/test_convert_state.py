@@ -176,3 +176,47 @@ def test_main_writes_the_state_object(test_env: Path, monkeypatch: pytest.Monkey
     put_object("state.json", json_path.read_text())
 
     assert read_state() == {"http://example.com/feed": {"a", "b"}}
+
+
+def test_last_entry_id_of_an_entry_identified_by_its_title(test_env: Path, mock_smtp: MagicMock) -> None:
+    """An entry with neither an ID nor a link, which meed 0.3.0 identified by its bare title, is found by that title.
+
+    Its ID and those of the entries listed after it are recorded as meed identifies them, by title and date, so meed
+    sends only the entry listed before it.
+    """
+
+    def titled(name: str, hour: int) -> dict:
+        return create_feed_entry(
+            None, f"Post {name}", f"Summary {name}", None, f"Mon, 01 Jan 2025 {hour:02d}:00:00 GMT"
+        )
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([titled("C", 12), titled("B", 11), titled("A", 10)]))
+    feed_url = f"file://{feed_file}"
+    db_path = test_env / "state.db"
+    _write_db(db_path, [(feed_url, "Post B")])
+
+    state = convert(db_path)
+
+    assert state == {feed_url: {"Post A 2025-01-01T10:00:00Z", "Post B 2025-01-01T11:00:00Z"}}
+
+    _run_meed_on(state, [feed_url])
+
+    assert _sent_subjects(mock_smtp) == ["Post C"]
+
+
+def test_main_sets_network_timeout(test_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """main() bounds every feed fetch, so a feed that stalls is left out like one that cannot be fetched."""
+    import socket
+
+    from meed import NETWORK_TIMEOUT
+
+    db_path = test_env / "state.db"
+    _write_db(db_path, [])
+    monkeypatch.setattr("sys.argv", ["convert_state", str(db_path), str(test_env / "state.json")])
+
+    try:
+        main()
+        assert socket.getdefaulttimeout() == NETWORK_TIMEOUT
+    finally:
+        socket.setdefaulttimeout(None)

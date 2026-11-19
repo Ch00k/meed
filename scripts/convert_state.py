@@ -7,17 +7,30 @@ and every entry the feed lists after it count as seen. When it has left the feed
 so it and all the feed's entries count as seen. A feed with neither was empty when meed first checked it.
 """
 
+import socket
 import sqlite3
 import sys
 from pathlib import Path
 
-from meed import Feed, format_state
+from meed import NETWORK_TIMEOUT, Feed, FeedEntry, format_state, title_entry_id
+
+
+def released_entry_ids(entry: FeedEntry) -> set[str]:
+    """The IDs a release may have stored for the entry.
+
+    meed 0.3.0 identified an entry with neither an ID nor a link by its bare title.
+    """
+    if entry.id == title_entry_id(entry.title, entry.published):
+        return {entry.id, entry.title}
+
+    return {entry.id}
 
 
 def seen_from_last_entry_id(feed: Feed, last_entry_id: str) -> set[str]:
     entry_ids = [entry.id for entry in feed.entries]
-    if last_entry_id in entry_ids:
-        return set(entry_ids[entry_ids.index(last_entry_id) :])
+    for index, entry in enumerate(feed.entries):
+        if last_entry_id in released_entry_ids(entry):
+            return set(entry_ids[index:])
 
     print(f"Last sent entry {last_entry_id} is no longer in feed {feed.metadata.id}", file=sys.stderr)
     return {last_entry_id, *entry_ids}
@@ -60,6 +73,8 @@ def convert(db_path: Path) -> dict[str, set[str]]:
 
 def main() -> None:
     db_path, json_path = (Path(arg) for arg in sys.argv[1:])
+    # A feed that stalls then fails like one that cannot be fetched.
+    socket.setdefaulttimeout(NETWORK_TIMEOUT)
     json_path.write_text(format_state(convert(db_path)))
 
 

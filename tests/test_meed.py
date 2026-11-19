@@ -11,6 +11,7 @@ from tests.test_utils import (
     create_atom_feed,
     create_feed_entry,
     create_rss_feed,
+    delete_bucket,
     delete_object,
     get_email_body,
     get_email_count,
@@ -1204,18 +1205,48 @@ def test_feed_get_new_entries(test_env: Path) -> None:
     ]
 
 
-def test_job_function_exception_handling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that job() function handles exceptions properly."""
-    from meed import job
+def test_unreachable_bucket_fails_the_run(mock_smtp: MagicMock) -> None:
+    """When the feed list cannot be read from the bucket, the run fails: no feed can be checked."""
+    import pytest
+    from botocore.exceptions import ClientError
 
-    # Mock check_feeds to raise an exception
-    def mock_check_feeds() -> None:
-        raise ValueError("Test exception")
+    from meed import main
 
-    monkeypatch.setattr("meed.check_feeds", mock_check_feeds)
+    delete_bucket()
 
-    # Should not crash, exception should be caught
-    job()
+    with pytest.raises(ClientError, match="NoSuchBucket"):
+        main()
+
+    assert_no_emails_sent(mock_smtp)
+
+
+def test_state_that_cannot_be_read_is_not_taken_as_empty() -> None:
+    """Only a missing state object means no feed is known; any other bucket error is raised.
+
+    Taken as empty, an unreadable state would make every feed new and be overwritten, losing every entry seen.
+    """
+    import pytest
+    from botocore.exceptions import ClientError
+
+    from meed import read_state
+
+    delete_bucket()
+
+    with pytest.raises(ClientError, match="NoSuchBucket"):
+        read_state()
+
+
+def test_main_requires_a_bucket_name(monkeypatch: pytest.MonkeyPatch, mock_smtp: MagicMock) -> None:
+    """Without BUCKET_NAME a run fails at once, naming the setting."""
+    import pytest
+
+    monkeypatch.delenv("BUCKET_NAME")
+    from meed import main
+
+    with pytest.raises(RuntimeError, match="BUCKET_NAME is not set"):
+        main()
+
+    assert_no_emails_sent(mock_smtp)
 
 
 def test_unreachable_new_feed_gets_no_state(mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture) -> None:

@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 
 from meed import add_feed, is_valid_feed, parse_email_body, parse_feeds
-from tests.test_utils import create_atom_feed, create_rss_feed, get_object, put_object
+from tests.test_utils import create_atom_feed, create_rss_feed, delete_bucket, get_object, put_object
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -332,7 +332,9 @@ def test_check_emails_not_configured(monkeypatch: MonkeyPatch) -> None:
 
 def test_check_emails_with_messages(monkeypatch: MonkeyPatch) -> None:
     """Test check_emails with unread messages in mailbox."""
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock, call, patch
+
+    from imap_tools import MailMessageFlags
 
     put_object("feeds.txt", "")
     monkeypatch.setenv("MEED_IMAP_HOST", "imap.test.com")
@@ -366,9 +368,58 @@ def test_check_emails_with_messages(monkeypatch: MonkeyPatch) -> None:
 
         meed.check_emails()
 
-        # Both feeds were added; fetching the messages marked them as read
-        mock_mailbox.fetch.assert_called_once_with(criteria="UNSEEN")
+        # Both feeds were added, and each message was marked as read once handled
+        mock_mailbox.fetch.assert_called_once_with(criteria="UNSEEN", mark_seen=False)
         assert parse_feeds(get_object("feeds.txt") or "") == ["https://example.com/feed1", "https://example.com/feed2"]
+        assert mock_mailbox.flag.call_args_list == [
+            call("123", MailMessageFlags.SEEN, value=True),
+            call("124", MailMessageFlags.SEEN, value=True),
+        ]
+
+
+def test_check_emails_leaves_messages_it_could_not_handle_unread(monkeypatch: MonkeyPatch) -> None:
+    """When the bucket cannot be reached, no message is marked as read, so the next run handles them all."""
+    from unittest.mock import MagicMock, patch
+
+    import pytest
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setenv("MEED_IMAP_HOST", "imap.test.com")
+    monkeypatch.setenv("MEED_IMAP_USER", "test@test.com")
+    monkeypatch.setenv("MEED_IMAP_PASSWORD", "testpass")
+
+    import meed
+
+    delete_bucket()
+    mock_mailbox = MagicMock()
+    mock_mailbox.fetch.return_value = [
+        MagicMock(uid="123", text="https://example.com/feed1", html=None),
+        MagicMock(uid="124", text="https://example.com/feed2", html=None),
+    ]
+
+    with patch("meed.MailBox") as mock_mailbox_class, patch("meed.is_valid_feed", return_value=True):
+        mock_mailbox_class.return_value.login.return_value.__enter__.return_value = mock_mailbox
+
+        with pytest.raises(ClientError, match="NoSuchBucket"):
+            meed.check_emails()
+
+    mock_mailbox.flag.assert_not_called()
+
+
+def test_process_email_finds_the_category_of_a_list_with_crlf_line_endings(monkeypatch: MonkeyPatch) -> None:
+    """A feed list with Windows line endings gets the feed under its existing heading, and Unix line endings."""
+    from unittest.mock import MagicMock
+
+    from meed import process_email
+
+    put_object("feeds.txt", "# Blogs\r\nhttps://blog1.com/feed\r\n\r\n# News\r\nhttps://news1.com/feed\r\n")
+    monkeypatch.setattr("meed.is_valid_feed", lambda _: True)
+
+    process_email(MagicMock(uid="123", text="https://blog2.com/feed\nBlogs", html=None))
+
+    assert get_object("feeds.txt") == (
+        "# Blogs\nhttps://blog1.com/feed\nhttps://blog2.com/feed\n\n# News\nhttps://news1.com/feed\n"
+    )
 
 
 def test_check_emails_no_unread(monkeypatch: MonkeyPatch) -> None:
