@@ -1940,6 +1940,17 @@ def test_entries_dropping_out_of_the_feed_are_not_resent(test_env: Path, mock_sm
 
     assert _sent_subjects(mock_smtp) == ["Entry 3"]
 
+    # The newest entry left the feed and nothing new came: the last entry ID moves to the newest one the feed lists
+    mock_smtp.reset_mock()
+    feed_file.write_text(create_rss_feed([_entry("1", 10)]))
+    main()
+
+    assert_no_emails_sent(mock_smtp)
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    assert query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,)) == [
+        ("http://example.com/1",)
+    ]
+
 
 def test_reordered_entries_are_not_resent(test_env: Path, mock_smtp: MagicMock) -> None:
     """Entries with the same date that the feed lists in a different order on a later run are not sent again."""

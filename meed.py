@@ -85,9 +85,10 @@ SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 # and the Machine it runs on, going forever.
 NETWORK_TIMEOUT = 60
 
-# A feed's row says meed knows it. last_entry_id is the newest entry the feed listed once its new entries were sent:
-# what meed went by before it recorded every entry it has seen, kept up so that an earlier release can still run on
-# this database.
+# A feed's row says meed knows it. last_entry_id is the newest entry the feed listed at the end of the last run that
+# completed: what meed went by before it recorded every entry it has seen, kept up so that an earlier release can still
+# run on this database. After a run that failed partway it lags behind the entries sent, which such a release would
+# send again.
 SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
 # Every entry of a feed meed has seen: emailed, or already in the feed when meed first checked it.
 SQL_CREATE_SEEN_TABLE = (
@@ -265,7 +266,7 @@ class Feed(BaseModel):
             entry.send_notification(self.metadata.title)
             self.record_sent(entry.id)
 
-        if new_entries:
+        if self.entries:
             self.update_state(self.entries[0].id)
 
     def get_state(self) -> tuple[str | None] | None:
