@@ -136,10 +136,12 @@ and marked as read.
 
 ## How It Works
 
-1. **First run**: **meed** reads all feeds and stores their current state in the database. No emails are sent.
-2. **Subsequent runs**: **meed** compares the current feed state with the stored state and sends emails for new entries.
+1. **First run of a feed**: **meed** records every entry the feed has as seen. No emails are sent.
+2. **Subsequent runs**: every entry **meed** has not seen before is new, whatever its date and wherever the feed
+   lists it.
 3. **Email delivery**: New entries are sent in chronological order (oldest first) to preserve reading order.
-4. **State updates**: After successful processing, the database is updated with the latest feed state.
+4. **State updates**: Each entry is recorded as seen as soon as its email is sent, so a run that fails partway sends
+   nothing twice.
 
 ## Development
 
