@@ -2,7 +2,6 @@ import logging
 import smtplib
 import socket
 import sqlite3
-import time
 import tomllib
 import urllib.error
 from contextlib import contextmanager
@@ -86,9 +85,9 @@ SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 # and the Machine it runs on, going forever.
 NETWORK_TIMEOUT = 60
 
-# A feed's row says meed knows it. last_entry_id is the entry meed sent last (or the newest one when it first checked
-# the feed): what meed went by before it recorded every entry it has seen, kept up so that an earlier release can still
-# run on this database.
+# A feed's row says meed knows it. last_entry_id is the newest entry the feed listed once its new entries were sent:
+# what meed went by before it recorded every entry it has seen, kept up so that an earlier release can still run on
+# this database.
 SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
 # Every entry of a feed meed has seen: emailed, or already in the feed when meed first checked it.
 SQL_CREATE_SEEN_TABLE = (
@@ -130,6 +129,15 @@ class FeedEntry(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def ensure_fields(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Determine published date. feedparser parses each date it can read into a UTC time.struct_time.
+        published_date = value.get("published_parsed") or value.get("updated_parsed") or value.get("created_parsed")
+        if not published_date:
+            label = value.get("id") or value.get("link") or value.get("title")
+            logger.warning(f"FeedEntry {label} has no published date, skipping entry")
+            raise InvalidFeedEntryError("FeedEntry must have a published, updated, or created date")
+
+        value["published"] = datetime(*published_date[:6], tzinfo=UTC)
+
         # Ensure id field exists
         if not value.get("id"):
             logger.warning("FeedEntry has no ID, attempting to use link or title as ID")
@@ -139,10 +147,7 @@ class FeedEntry(BaseModel):
             elif value.get("title"):
                 logger.warning("Using title and date as ID")
                 # A title alone repeats, as a daily post's does: the date tells such entries apart.
-                date = value.get("published_parsed") or value.get("updated_parsed") or value.get("created_parsed")
-                value["id"] = (
-                    f"{value['title']} {time.strftime('%Y-%m-%dT%H:%M:%SZ', date)}" if date else value["title"]
-                )
+                value["id"] = f"{value['title']} {value['published']:%Y-%m-%dT%H:%M:%SZ}"
             else:
                 raise InvalidFeedEntryError("FeedEntry must have either ID, link, or title")
 
@@ -160,14 +165,6 @@ class FeedEntry(BaseModel):
         if not value.get("summary"):
             logger.warning(f"FeedEntry {value['id']} has no summary, using ID as summary")
             value["summary"] = value["id"]
-
-        # Determine published date. feedparser parses each date it can read into a UTC time.struct_time.
-        published_date = value.get("published_parsed") or value.get("updated_parsed") or value.get("created_parsed")
-        if not published_date:
-            logger.warning(f"FeedEntry {value['id']} has no published date, skipping entry")
-            raise InvalidFeedEntryError("FeedEntry must have a published, updated, or created date")
-
-        value["published"] = datetime(*published_date[:6], tzinfo=UTC)
 
         return value
 
@@ -268,6 +265,9 @@ class Feed(BaseModel):
             entry.send_notification(self.metadata.title)
             self.record_sent(entry.id)
 
+        if new_entries:
+            self.update_state(self.entries[0].id)
+
     def get_state(self) -> tuple[str | None] | None:
         """The feed's stored row, holding its last entry ID, or None for a feed with no state yet."""
         with get_db_cursor() as cursor:
@@ -303,10 +303,14 @@ class Feed(BaseModel):
             self.record_seen(cursor, [entry.id for entry in self.entries])
 
     def record_sent(self, entry_id: str) -> None:
-        """Record an entry whose email was sent as seen, and as the feed's last entry."""
+        """Record an entry whose email was sent as seen."""
         with get_db_cursor() as cursor:
             self.record_seen(cursor, [entry_id])
-            cursor.execute(SQL_UPDATE_STATE, (entry_id, self.metadata.id))
+
+    def update_state(self, last_entry_id: str) -> None:
+        with get_db_cursor() as cursor:
+            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_UPDATE_STATE, last_entry_id, self.metadata.id)
+            cursor.execute(SQL_UPDATE_STATE, (last_entry_id, self.metadata.id))
 
     def convert_last_entry_id(self, last_entry_id: str) -> set[str]:
         """Turn the last entry sent, all a feed's state held before seen entries, into seen entries, and return them.

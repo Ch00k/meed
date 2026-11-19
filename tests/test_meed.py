@@ -876,6 +876,12 @@ def test_very_old_entry_added(test_env: Path, mock_smtp: MagicMock) -> None:
     assert get_email_count(mock_smtp) == 1
     assert_email_sent(mock_smtp, "Entry D", "from@test.com", "to@test.com")
 
+    # The last entry ID stays at the newest entry listed, where an earlier release would cut off
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    assert query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,)) == [
+        ("http://example.com/c",)
+    ]
+
 
 def test_all_entries_removed_then_readded(test_env: Path, mock_smtp: MagicMock) -> None:
     """Test 20: Feed cleared and repopulated treats all as new."""
