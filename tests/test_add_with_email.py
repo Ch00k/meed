@@ -3,9 +3,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from meed import add_feed_to_file, is_valid_feed, parse_email_body, read_feeds_file
-from tests.test_utils import create_rss_feed
+from tests.test_utils import create_atom_feed, create_rss_feed
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import pytest
     from _pytest.monkeypatch import MonkeyPatch
 
@@ -146,20 +148,39 @@ def test_add_feed_to_file_category_at_end(tmp_path: Path) -> None:
     assert "https://blog2.com/feed" in lines
 
 
-def test_is_valid_feed_accepts_a_feed(tmp_path: Path) -> None:
-    """An RSS document is a feed."""
+def test_is_valid_feed_accepts_rss_and_atom(serve_feed: Callable[[int, str], str]) -> None:
+    """An RSS or Atom document served over HTTP is a feed."""
+    assert is_valid_feed(serve_feed(200, create_rss_feed([]))) is True
+    assert is_valid_feed(serve_feed(200, create_atom_feed([]))) is True
+
+
+def test_is_valid_feed_rejects_a_web_page(serve_feed: Callable[[int, str], str]) -> None:
+    """An HTML page is not a feed, although feedparser parses it without an error."""
+    page = "<!doctype html><html><head><title>Blog</title></head><body><p>Hello</p></body></html>"
+
+    assert is_valid_feed(serve_feed(200, page)) is False
+
+
+def test_is_valid_feed_rejects_an_http_error(
+    serve_feed: Callable[[int, str], str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A feed document served with an error status is not a feed, and the error is logged."""
+    url = serve_feed(404, create_rss_feed([]))
+
+    assert is_valid_feed(url) is False
+    assert f"Error validating feed {url}: HTTP 404 from {url}" in caplog.messages
+
+
+def test_is_valid_feed_rejects_what_is_not_an_http_url(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A local file or a literal XML document is not a URL to poll, although feedparser reads both as feeds."""
     feed_file = tmp_path / "feed.xml"
     feed_file.write_text(create_rss_feed([]))
+    inline = '<rss version="2.0"><channel><title>Inline</title></channel></rss>'
 
-    assert is_valid_feed(f"file://{feed_file}") is True
-
-
-def test_is_valid_feed_rejects_a_web_page(tmp_path: Path) -> None:
-    """An HTML page is not a feed, although feedparser parses it without an error."""
-    page = tmp_path / "page.html"
-    page.write_text("<!doctype html><html><head><title>Blog</title></head><body><p>Hello</p></body></html>")
-
-    assert is_valid_feed(f"file://{page}") is False
+    assert is_valid_feed(f"file://{feed_file}") is False
+    assert is_valid_feed(str(feed_file)) is False
+    assert is_valid_feed(inline) is False
+    assert f"file://{feed_file} is not an HTTP(S) URL" in caplog.messages
 
 
 def test_is_valid_feed_rejects_an_unreachable_url(caplog: pytest.LogCaptureFixture) -> None:

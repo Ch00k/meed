@@ -10,6 +10,7 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import environs
 import feedparser
@@ -53,6 +54,10 @@ class MeedJSONFormatter(JSONFormatter):
 
 class InvalidFeedEntryError(Exception):
     """Raised when a feed entry cannot be parsed due to missing required fields."""
+
+
+class FeedFetchError(Exception):
+    """Raised when a feed's server answers with an HTTP error."""
 
 
 env = environs.Env()
@@ -220,8 +225,9 @@ class Feed(BaseModel):
 
             new_entries.append(entry)
 
-        # Sort new entries by published date, oldest first
-        return sorted(new_entries, key=lambda e: e.published)
+        # Oldest first: the exact reverse of the order the last entry ID is looked up in, so that entries with the
+        # same date are never sent twice or skipped.
+        return new_entries[::-1]
 
     def process(self) -> None:
         if not self.is_known():
@@ -298,6 +304,12 @@ def fetch_feed(url: str) -> feedparser.FeedParserDict:
     if isinstance(parsed_feed.get("bozo_exception"), urllib.error.URLError):
         raise parsed_feed["bozo_exception"]
 
+    # feedparser parses the body of an error response too.
+    status = parsed_feed.get("status", 200)
+    if status >= 400:
+        msg = f"HTTP {status} from {url}"
+        raise FeedFetchError(msg)
+
     return parsed_feed
 
 
@@ -322,14 +334,22 @@ def parse_email_body(body: str) -> tuple[str | None, str | None]:
 
 
 def is_valid_feed(url: str) -> bool:
-    """Check that a URL serves an RSS or Atom feed. feedparser names the format of one it recognises."""
+    """Check that a URL serves an RSS or Atom feed over HTTP(S).
+
+    feedparser also reads a local path or a literal XML document, either of which an email could carry instead of a
+    URL. It names the format of a feed it recognises, such as rss20 or atom10.
+    """
+    if urlparse(url).scheme not in {"http", "https"}:
+        logger.warning(f"{url} is not an HTTP(S) URL")
+        return False
+
     try:
         parsed_feed = fetch_feed(url)
     except Exception as e:
         logger.error(f"Error validating feed {url}: {e}")
         return False
 
-    return bool(parsed_feed.get("version"))
+    return parsed_feed.get("version", "").startswith(("rss", "atom"))
 
 
 def add_feed_to_file(file_path: Path, url: str, category: str | None = None) -> None:

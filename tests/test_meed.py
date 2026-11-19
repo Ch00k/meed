@@ -18,6 +18,7 @@ from tests.test_utils import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from unittest.mock import MagicMock
 
     import pytest
@@ -1678,3 +1679,72 @@ def test_read_feeds_file_skips_comments_and_blank_lines(tmp_path: Path) -> None:
     feeds_file.write_text("# blogs\nhttps://a.example/feed\n\n  # indented\n  https://b.example/feed  \n")
 
     assert read_feeds_file(feeds_file) == ["https://a.example/feed", "https://b.example/feed"]
+
+
+def test_entries_with_the_same_date_are_sent_once(
+    test_env: Path, mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """New entries sharing a date are each sent exactly once, also when a send fails between them.
+
+    The feed lists B before A, both dated 11:00. They are sent A then B. With the second send failing, the next run
+    sends B and nothing else; once both are sent, a further run sends nothing.
+    """
+    from meed import main
+
+    first = create_feed_entry(
+        "http://example.com/1", "Entry 1", "Summary 1", "http://example.com/1", "Mon, 01 Jan 2025 10:00:00 GMT"
+    )
+    a, b = (
+        create_feed_entry(
+            f"http://example.com/{name}",
+            f"Entry {name}",
+            "Summary",
+            f"http://example.com/{name}",
+            "Mon, 01 Jan 2025 11:00:00 GMT",
+        )
+        for name in ("A", "B")
+    )
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([first]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    sendmail_mock = mock_smtp.return_value.__enter__.return_value.sendmail
+
+    main()
+
+    feed_file.write_text(create_rss_feed([b, a, first]))
+    sendmail_mock.side_effect = [None, Exception("SMTP failed")]
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry A", "Entry B"]
+    assert "Error processing feed Test Feed: SMTP failed" in caplog.messages
+    assert_feed_state(state_db, feed_url, "http://example.com/A")
+
+    mock_smtp.reset_mock()
+    sendmail_mock.side_effect = None
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry B"]
+    assert_feed_state(state_db, feed_url, "http://example.com/B")
+
+    mock_smtp.reset_mock()
+    main()
+
+    assert_no_emails_sent(mock_smtp)
+
+
+def test_new_feed_answering_with_an_http_error_gets_no_state(
+    serve_feed: Callable[[int, str], str], mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A new feed whose server answers with an error gets no state, even when the error response is a feed."""
+    from meed import main
+
+    url = serve_feed(503, create_rss_feed([]))
+    create_feeds_file([url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+
+    assert_no_emails_sent(mock_smtp)
+    assert query_db(Path(os.environ["MEED_STATE_DB_PATH"]), "SELECT COUNT(*) FROM feeds")[0][0] == 0
+    assert f"Error fetching or parsing feed {url}: HTTP 503 from {url}" in caplog.messages

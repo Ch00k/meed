@@ -64,11 +64,14 @@ straight away and then hourly.
 
 ### Releasing
 
-A release is a version tag. CI (`.github/workflows/ci.yml`) runs `make check` on every push, and on a tag such as
-`0.4.0` it also builds the image and deploys it, refusing a tag that is not the version in `pyproject.toml`:
+A release is a version tag. CI (`.github/workflows/ci.yml`) runs `make check` on pushes to `main`, on pull requests
+and on tags, and on a tag such as `0.4.0` it also builds the image and deploys it, refusing a tag that is not the
+version in `pyproject.toml`. `uv version` sets the version in both `pyproject.toml` and `uv.lock`, which CI checks
+against each other:
 
 ```bash
-# Bump version in pyproject.toml, commit, then:
+uv version 0.4.0
+git commit -m "Bump version to 0.4.0" pyproject.toml uv.lock
 git tag 0.4.0
 git push origin main 0.4.0
 ```
