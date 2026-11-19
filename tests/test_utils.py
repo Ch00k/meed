@@ -199,11 +199,17 @@ def query_db(db_path: Path, query: str, params: tuple = ()) -> list:
     return rows
 
 
-def assert_feed_state(db_path: Path, feed_id: str, last_entry_id: str) -> None:
-    """Assert that a feed has the expected state in the database."""
-    rows = query_db(db_path, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_id,))
+def seen_entry_ids(db_path: Path, feed_id: str) -> set[str]:
+    """The IDs of the entries of a feed that meed has recorded as seen."""
+    return {row[0] for row in query_db(db_path, "SELECT entry_id FROM seen_entries WHERE feed_id = ?", (feed_id,))}
+
+
+def assert_seen_entries(db_path: Path, feed_id: str, entry_ids: set[str]) -> None:
+    """Assert that a feed is known and that exactly these of its entries are recorded as seen."""
+    rows = query_db(db_path, "SELECT id FROM feeds WHERE id = ?", (feed_id,))
     assert len(rows) > 0, f"Feed {feed_id} not found in database"
-    assert rows[0][0] == last_entry_id, f"Expected last_entry_id={last_entry_id}, got {rows[0][0]}"
+    seen = seen_entry_ids(db_path, feed_id)
+    assert seen == entry_ids, f"Expected seen entries {entry_ids}, got {seen}"
 
 
 def get_email_body(email_str: str) -> str:

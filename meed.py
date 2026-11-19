@@ -85,10 +85,20 @@ SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 # and the Machine it runs on, going forever.
 NETWORK_TIMEOUT = 60
 
+# A feed's row says meed knows it. last_entry_id is set only on a row from before meed recorded every entry it has seen:
+# the newest entry it had sent. The first run that finds one turns it into seen entries and clears it.
 SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
+# Every entry of a feed meed has seen: emailed, or already in the feed when meed first checked it.
+SQL_CREATE_SEEN_TABLE = (
+    "CREATE TABLE IF NOT EXISTS seen_entries (feed_id TEXT NOT NULL, entry_id TEXT NOT NULL, "
+    "PRIMARY KEY (feed_id, entry_id))"
+)
 SQL_GET_STATE = "SELECT last_entry_id FROM feeds WHERE id = ?"
-SQL_CREATE_STATE = "INSERT INTO feeds (id, last_checked_at, last_entry_id) VALUES (?, datetime('now'), ?)"
-SQL_UPDATE_STATE = "UPDATE feeds SET last_checked_at = datetime('now'), last_entry_id = ? WHERE id = ?"
+SQL_CREATE_STATE = "INSERT INTO feeds (id, last_checked_at, last_entry_id) VALUES (?, datetime('now'), NULL)"
+SQL_CLEAR_LAST_ENTRY = "UPDATE feeds SET last_entry_id = NULL WHERE id = ?"
+SQL_UPDATE_LAST_CHECKED = "UPDATE feeds SET last_checked_at = datetime('now') WHERE id = ?"
+SQL_GET_SEEN = "SELECT entry_id FROM seen_entries WHERE feed_id = ?"
+SQL_ADD_SEEN = "INSERT OR IGNORE INTO seen_entries (feed_id, entry_id) VALUES (?, ?)"
 
 
 # meed is not installed as a package, so there is no package metadata to read its version from.
@@ -213,17 +223,12 @@ class Feed(BaseModel):
 
         return cls(**parsed_feed)  # pyright: ignore[reportArgumentType]
 
-    def get_new_entries(self, last_id: str | None) -> list[FeedEntry]:
-        new_entries = []
-        for entry in self.entries:
-            if entry.id == last_id:
-                break
+    def get_new_entries(self, seen: set[str]) -> list[FeedEntry]:
+        """The entries not seen yet, oldest first.
 
-            new_entries.append(entry)
-
-        # Oldest first: the exact reverse of the order the last entry ID is looked up in, so that entries with the
-        # same date are never sent twice or skipped.
-        return new_entries[::-1]
+        Entries with the same date are sent in the reverse of the feed's order, which lists newer entries first.
+        """
+        return [entry for entry in reversed(self.entries) if entry.id not in seen]
 
     def process(self) -> None:
         if not self.is_known():
@@ -234,20 +239,21 @@ class Feed(BaseModel):
         logger.info(f"Feed {self.metadata.title} is known, checking for new entries")
 
         last_entry_id = self.get_last_entry_id()
-        logger.info(f"Last known entry ID: {last_entry_id}")
+        if last_entry_id is not None:
+            self.convert_last_entry_id(last_entry_id)
 
-        new_entries = self.get_new_entries(last_entry_id)
+        new_entries = self.get_new_entries(self.get_seen_entry_ids())
 
         if new_entries:
             logger.info(f"Found {len(new_entries)} new entries")
         else:
             logger.info("No new entries found")
 
-        # The state moves past each entry as soon as its email is sent, so a run that fails partway resends nothing.
+        # Each entry is recorded as seen as soon as its email is sent, so a run that fails partway resends nothing.
         for entry in new_entries:
             logger.info(f"Sending notification for entry {entry.title} ({entry.link})")
             entry.send_notification(self.metadata.title)
-            self.update_state(entry.id)
+            self.add_seen_entries([entry.id])
 
     def get_state(self) -> tuple[str | None] | None:
         """The feed's stored row, holding its last entry ID, or None for a feed with no state yet."""
@@ -266,16 +272,41 @@ class Feed(BaseModel):
         row = self.get_state()
         return row[0] if row else None
 
-    def create_state(self) -> None:
-        last_entry = self.entries[0].id if self.entries else None
+    def get_seen_entry_ids(self) -> set[str]:
         with get_db_cursor() as cursor:
-            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_CREATE_STATE, self.metadata.id, last_entry)
-            cursor.execute(SQL_CREATE_STATE, (self.metadata.id, last_entry))
+            cursor.execute(SQL_GET_SEEN, (self.metadata.id,))
+            return {row[0] for row in cursor.fetchall()}
 
-    def update_state(self, last_entry: str) -> None:
+    def create_state(self) -> None:
+        """Record the feed, with every entry it has now as seen: only entries published from here on are new."""
         with get_db_cursor() as cursor:
-            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_UPDATE_STATE, last_entry, self.metadata.id)
-            cursor.execute(SQL_UPDATE_STATE, (last_entry, self.metadata.id))
+            logger.debug("Executing SQL: %s with params (%s)", SQL_CREATE_STATE, self.metadata.id)
+            cursor.execute(SQL_CREATE_STATE, (self.metadata.id,))
+            cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry.id) for entry in self.entries])
+
+    def add_seen_entries(self, entry_ids: list[str]) -> None:
+        with get_db_cursor() as cursor:
+            logger.debug("Recording entries %s of feed %s as seen", entry_ids, self.metadata.id)
+            cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry_id) for entry_id in entry_ids])
+            cursor.execute(SQL_UPDATE_LAST_CHECKED, (self.metadata.id,))
+
+    def convert_last_entry_id(self, last_entry_id: str) -> None:
+        """Turn the newest entry sent, all a feed's state held before seen entries, into seen entries.
+
+        That entry and every entry the feed lists after it count as seen. When it has left the feed, which entries
+        are new cannot be told, so all of them count as seen and none is sent.
+        """
+        entry_ids = [entry.id for entry in self.entries]
+        if last_entry_id in entry_ids:
+            seen = entry_ids[entry_ids.index(last_entry_id) :]
+        else:
+            logger.warning(f"Last sent entry {last_entry_id} is no longer in feed {self.metadata.title}")
+            seen = entry_ids
+
+        logger.info(f"Recording {len(seen)} entries of feed {self.metadata.title} as seen, up to {last_entry_id}")
+        with get_db_cursor() as cursor:
+            cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry_id) for entry_id in seen])
+            cursor.execute(SQL_CLEAR_LAST_ENTRY, (self.metadata.id,))
 
 
 def read_feeds_file(file_path: Path) -> list[str]:
@@ -386,19 +417,19 @@ def add_feed_to_file(file_path: Path, url: str, category: str | None = None) -> 
         with Path.open(file_path, "a") as f:
             f.write(f"\n\n{category_comment}{url}\n")
     else:
-        # Category exists - find where to insert (after last URL in this category)
+        # Category exists - insert after the last URL in it, before the blank line or comment that ends it
         insert_index = category_index + 1
-
-        # Find the next category comment or end of file
         for i in range(category_index + 1, len(lines)):
             if lines[i].startswith("#"):
-                insert_index = i
                 break
-            if lines[i].strip():  # Non-empty line
+            if lines[i].strip():
                 insert_index = i + 1
 
-        # Insert the URL
-        lines.insert(insert_index, f"{url}\n\n")
+        # The line before may be the file's last, without a line break of its own
+        if not lines[insert_index - 1].endswith("\n"):
+            lines[insert_index - 1] += "\n"
+
+        lines.insert(insert_index, f"{url}\n")
 
         # Write back the entire file
         with Path.open(file_path, "w") as f:
@@ -419,6 +450,10 @@ def process_email(msg: MailMessage) -> None:
     url, category = parse_email_body(body_text)
     if not url:
         logger.warning(f"Email {msg.uid} has no valid URL")
+        return
+
+    if url in read_feeds_file(FEEDS_FILE_PATH):
+        logger.info(f"Feed {url} is already in the feeds file")
         return
 
     if not is_valid_feed(url):
@@ -451,6 +486,7 @@ def check_emails() -> None:
 def create_state_table() -> None:
     with get_db_cursor() as cursor:
         cursor.execute(SQL_CREATE_STATE_TABLE)
+        cursor.execute(SQL_CREATE_SEEN_TABLE)
 
 
 def check_feeds() -> None:

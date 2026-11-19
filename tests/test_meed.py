@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tests.test_utils import (
-    assert_feed_state,
+    assert_email_sent,
     assert_no_emails_sent,
+    assert_seen_entries,
     create_atom_feed,
     create_feed_entry,
     create_feeds_file,
@@ -15,6 +16,7 @@ from tests.test_utils import (
     get_email_body,
     get_email_count,
     query_db,
+    seen_entry_ids,
 )
 
 if TYPE_CHECKING:
@@ -69,9 +71,9 @@ def test_new_feed_no_emails_sent(test_env: Path, mock_smtp: MagicMock) -> None:
 
     # Assert database state created with latest entry
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
-    assert len(rows) > 0, "Feed not found in database"
-    assert rows[0][0] == "http://example.com/entry-3"
+    assert_seen_entries(
+        state_db, feed_url, {"http://example.com/entry-1", "http://example.com/entry-2", "http://example.com/entry-3"}
+    )
 
     # Assert last_checked_at is set
     rows = query_db(state_db, "SELECT last_checked_at FROM feeds WHERE id = ?", (feed_url,))
@@ -164,8 +166,7 @@ def test_new_entries_notification(test_env: Path, mock_smtp: MagicMock) -> None:
 
     # Assert database updated with newest entry
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
-    assert rows[0][0] == "http://example.com/entry-e"
+    assert_seen_entries(state_db, feed_url, {f"http://example.com/entry-{letter}" for letter in "abcde"})
 
 
 def test_no_new_entries(test_env: Path, mock_smtp: MagicMock) -> None:
@@ -207,7 +208,7 @@ def test_no_new_entries(test_env: Path, mock_smtp: MagicMock) -> None:
     assert_no_emails_sent(mock_smtp)
 
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    initial_state = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
+    initial_seen = seen_entry_ids(state_db, feed_url)
     initial_checked = query_db(state_db, "SELECT last_checked_at FROM feeds WHERE id = ?", (feed_url,))
 
     # Run again without modifying feed
@@ -218,8 +219,7 @@ def test_no_new_entries(test_env: Path, mock_smtp: MagicMock) -> None:
     assert_no_emails_sent(mock_smtp)
 
     # Database state unchanged (except last_checked_at)
-    new_state = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
-    assert new_state[0][0] == initial_state[0][0]
+    assert seen_entry_ids(state_db, feed_url) == initial_seen
 
     # last_checked_at updated
     new_checked = query_db(state_db, "SELECT last_checked_at FROM feeds WHERE id = ?", (feed_url,))
@@ -264,10 +264,8 @@ def test_multiple_feeds(test_env: Path, mock_smtp: MagicMock) -> None:
 
     # Verify both feeds in database
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    rows1 = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed1_url,))
-    rows2 = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed2_url,))
-    assert len(rows1) > 0
-    assert len(rows2) > 0
+    assert_seen_entries(state_db, feed1_url, {"http://feed1.com/1", "http://feed1.com/2"})
+    assert_seen_entries(state_db, feed2_url, {"http://feed2.com/1", "http://feed2.com/2"})
 
     # Add entry to feed1 only
     feed1_entries.append(
@@ -286,10 +284,8 @@ def test_multiple_feeds(test_env: Path, mock_smtp: MagicMock) -> None:
     assert get_email_count(mock_smtp) == 1
 
     # Verify only feed1 state updated
-    new_rows1 = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed1_url,))
-    new_rows2 = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed2_url,))
-    assert new_rows1[0][0] == "http://feed1.com/3"
-    assert new_rows2[0][0] == rows2[0][0]  # Unchanged
+    assert_seen_entries(state_db, feed1_url, {"http://feed1.com/1", "http://feed1.com/2", "http://feed1.com/3"})
+    assert_seen_entries(state_db, feed2_url, {"http://feed2.com/1", "http://feed2.com/2"})  # Unchanged
 
 
 def test_entry_without_id(test_env: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -315,8 +311,7 @@ def test_entry_without_id(test_env: Path, caplog: pytest.LogCaptureFixture) -> N
 
     # Verify state uses link as ID
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
-    assert rows[0][0] == "http://example.com/1"
+    assert_seen_entries(state_db, feed_url, {"http://example.com/1"})
 
 
 def test_entry_without_title(test_env: Path, mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
@@ -457,9 +452,7 @@ def test_entry_with_multiple_date_fields(test_env: Path) -> None:
     main()
 
     # Entry processed successfully
-    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
-    assert rows[0][0] == "http://example.com/1"
+    assert_seen_entries(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, {"http://example.com/1"})
 
 
 def test_atom_feed_processing(test_env: Path, mock_smtp: MagicMock) -> None:
@@ -659,8 +652,7 @@ def test_smtp_error_handling(test_env: Path, mock_smtp: MagicMock, caplog: pytes
 
     # Database state should not be updated (transaction rolled back)
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    rows = query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,))
-    assert rows[0][0] == "http://example.com/1"  # Still old entry
+    assert_seen_entries(state_db, feed_url, {"http://example.com/1"})  # The failed entry is not recorded
 
 
 def test_entry_order_preservation(test_env: Path, mock_smtp: MagicMock) -> None:
@@ -800,7 +792,7 @@ def test_duplicate_entries_in_feed(test_env: Path, mock_smtp: MagicMock) -> None
 
 
 def test_very_old_entry_added(test_env: Path, mock_smtp: MagicMock) -> None:
-    """Test 19: Old entry added after newer ones is not detected as new."""
+    """Test 19: An entry that appears with a date older than entries already sent is new, and is sent."""
     from meed import main
 
     initial_entries = [
@@ -838,8 +830,9 @@ def test_very_old_entry_added(test_env: Path, mock_smtp: MagicMock) -> None:
     mock_smtp.reset_mock()
     main()
 
-    # No email sent (D is older than last known entry C)
-    assert_no_emails_sent(mock_smtp)
+    # D was never seen, so it is sent, although it is dated before C
+    assert get_email_count(mock_smtp) == 1
+    assert_email_sent(mock_smtp, "Entry D", "from@test.com", "to@test.com")
 
 
 def test_all_entries_removed_then_readded(test_env: Path, mock_smtp: MagicMock) -> None:
@@ -1185,8 +1178,8 @@ def test_document_that_is_not_a_feed_gets_no_state(
     assert f"Error fetching or parsing feed {feed_url}: {feed_url} is not an RSS or Atom feed" in caplog.messages
 
 
-def test_feed_get_new_entries_with_no_last_id(test_env: Path) -> None:
-    """Test that get_new_entries returns all entries when last_id is None."""
+def test_feed_get_new_entries(test_env: Path) -> None:
+    """get_new_entries returns the entries not seen yet, oldest first: all of them when none was seen."""
     from meed import Feed
 
     entries = [
@@ -1212,9 +1205,13 @@ def test_feed_get_new_entries_with_no_last_id(test_env: Path) -> None:
     feed_url = f"file://{feed_file}"
     feed = Feed.from_url(feed_url)
 
-    # When last_id is None, should return all entries
-    new_entries = feed.get_new_entries(None)
-    assert len(new_entries) == 2
+    assert [entry.id for entry in feed.get_new_entries(set())] == [
+        "http://example.com/entry-1",
+        "http://example.com/entry-2",
+    ]
+    assert [entry.id for entry in feed.get_new_entries({"http://example.com/entry-1"})] == [
+        "http://example.com/entry-2"
+    ]
 
 
 def test_job_function_exception_handling(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1429,10 +1426,9 @@ def test_assert_email_sent_helper(test_env: Path, mock_smtp: MagicMock) -> None:
     assert "Unique Body Content" in email_body
 
 
-def test_assert_feed_state_helper(test_env: Path) -> None:
-    """Test the assert_feed_state helper function."""
+def test_assert_seen_entries_helper(test_env: Path) -> None:
+    """Test the assert_seen_entries helper function."""
     from meed import main
-    from tests.test_utils import assert_feed_state
 
     entries = [
         create_feed_entry(
@@ -1451,7 +1447,7 @@ def test_assert_feed_state_helper(test_env: Path) -> None:
 
     # Test the helper function
     state_db = Path(os.environ["MEED_STATE_DB_PATH"])
-    assert_feed_state(state_db, feed_url, "http://example.com/1")
+    assert_seen_entries(state_db, feed_url, {"http://example.com/1"})
 
 
 def test_get_email_body_empty() -> None:
@@ -1558,7 +1554,7 @@ def test_failed_send_keeps_the_entries_already_sent(
 
     assert _sent_subjects(mock_smtp) == ["Entry 2", "Entry 3"]
     assert "Error processing feed Test Feed: SMTP failed" in caplog.messages
-    assert_feed_state(state_db, feed_url, "http://example.com/2")
+    assert_seen_entries(state_db, feed_url, {"http://example.com/1", "http://example.com/2"})
 
     mock_smtp.reset_mock()
     sendmail_mock.side_effect = None
@@ -1566,7 +1562,11 @@ def test_failed_send_keeps_the_entries_already_sent(
     main()
 
     assert _sent_subjects(mock_smtp) == ["Entry 3", "Entry 4"]
-    assert_feed_state(state_db, feed_url, "http://example.com/4")
+    assert_seen_entries(
+        state_db,
+        feed_url,
+        {"http://example.com/1", "http://example.com/2", "http://example.com/3", "http://example.com/4"},
+    )
 
 
 def test_line_breaks_in_titles_are_sent_on_one_line(test_env: Path, mock_smtp: MagicMock) -> None:
@@ -1594,7 +1594,9 @@ def test_line_breaks_in_titles_are_sent_on_one_line(test_env: Path, mock_smtp: M
     message = message_from_string(mock_smtp.return_value.__enter__.return_value.sendmail.call_args.args[2])
     assert message["Subject"] == "Two lines"
     assert message["From"] == "Feed Name <from@test.com>"
-    assert_feed_state(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, "http://example.com/2")
+    assert_seen_entries(
+        Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, {"http://example.com/1", "http://example.com/2"}
+    )
 
 
 def test_entries_of_a_feed_first_seen_empty_are_sent_oldest_first(test_env: Path, mock_smtp: MagicMock) -> None:
@@ -1626,7 +1628,11 @@ def test_entries_of_a_feed_first_seen_empty_are_sent_oldest_first(test_env: Path
     main()
 
     assert _sent_subjects(mock_smtp) == ["Entry 1", "Entry 2", "Entry 3"]
-    assert_feed_state(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, "http://example.com/3")
+    assert_seen_entries(
+        Path(os.environ["MEED_STATE_DB_PATH"]),
+        feed_url,
+        {"http://example.com/1", "http://example.com/2", "http://example.com/3"},
+    )
 
 
 def test_entry_with_unreadable_date_is_skipped(test_env: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -1647,7 +1653,7 @@ def test_entry_with_unreadable_date_is_skipped(test_env: Path, caplog: pytest.Lo
     main()
 
     assert any("http://example.com/2 has no published date" in record.message for record in caplog.records)
-    assert_feed_state(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, "http://example.com/1")
+    assert_seen_entries(Path(os.environ["MEED_STATE_DB_PATH"]), feed_url, {"http://example.com/1"})
 
 
 def test_log_timestamp_is_utc(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1720,14 +1726,14 @@ def test_entries_with_the_same_date_are_sent_once(
 
     assert _sent_subjects(mock_smtp) == ["Entry A", "Entry B"]
     assert "Error processing feed Test Feed: SMTP failed" in caplog.messages
-    assert_feed_state(state_db, feed_url, "http://example.com/A")
+    assert_seen_entries(state_db, feed_url, {"http://example.com/1", "http://example.com/A"})
 
     mock_smtp.reset_mock()
     sendmail_mock.side_effect = None
     main()
 
     assert _sent_subjects(mock_smtp) == ["Entry B"]
-    assert_feed_state(state_db, feed_url, "http://example.com/B")
+    assert_seen_entries(state_db, feed_url, {"http://example.com/1", "http://example.com/A", "http://example.com/B"})
 
     mock_smtp.reset_mock()
     main()
@@ -1766,3 +1772,133 @@ def test_redirect_to_an_error_page_gets_no_state(
     assert_no_emails_sent(mock_smtp)
     assert query_db(Path(os.environ["MEED_STATE_DB_PATH"]), "SELECT COUNT(*) FROM feeds")[0][0] == 0
     assert any(f"{redirecting} is not an RSS or Atom feed" in message for message in caplog.messages)
+
+
+def _entry(name: str, hour: int) -> dict:
+    """An RSS entry named name, dated on 1 January 2025 at hour."""
+    return create_feed_entry(
+        f"http://example.com/{name}",
+        f"Entry {name}",
+        f"Summary {name}",
+        f"http://example.com/{name}",
+        f"Mon, 01 Jan 2025 {hour:02d}:00:00 GMT",
+    )
+
+
+def _write_state_from_before_seen_entries(db_path: Path, feed_url: str, last_entry_id: str | None) -> None:
+    """Write state as meed kept it before it recorded seen entries: a feeds table with the newest entry sent."""
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)")
+    conn.execute("INSERT INTO feeds VALUES (?, datetime('now'), ?)", (feed_url, last_entry_id))
+    conn.commit()
+    conn.close()
+
+
+def test_state_from_before_seen_entries_is_converted(test_env: Path, mock_smtp: MagicMock) -> None:
+    """A feed's last entry ID from before seen entries becomes seen entries: it and everything listed after it.
+
+    The entries listed before it are new and are sent, oldest first; the stored last entry ID is cleared.
+    """
+    from meed import main
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([_entry("D", 13), _entry("C", 12), _entry("B", 11), _entry("A", 10)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    _write_state_from_before_seen_entries(state_db, feed_url, "http://example.com/B")
+
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry C", "Entry D"]
+    assert_seen_entries(
+        state_db,
+        feed_url,
+        {"http://example.com/A", "http://example.com/B", "http://example.com/C", "http://example.com/D"},
+    )
+    assert query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,)) == [(None,)]
+
+    mock_smtp.reset_mock()
+    main()
+
+    assert_no_emails_sent(mock_smtp)
+
+
+def test_state_from_before_seen_entries_whose_entry_left_the_feed(
+    test_env: Path, mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When the stored last entry is no longer in the feed, which entries are new cannot be told: none is sent."""
+    from meed import main
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([_entry("C", 12), _entry("B", 11)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    _write_state_from_before_seen_entries(state_db, feed_url, "http://example.com/A")
+
+    main()
+
+    assert_no_emails_sent(mock_smtp)
+    assert_seen_entries(state_db, feed_url, {"http://example.com/B", "http://example.com/C"})
+    assert "Last sent entry http://example.com/A is no longer in feed Test Feed" in caplog.messages
+
+
+def test_state_from_before_seen_entries_of_a_feed_first_seen_empty(test_env: Path, mock_smtp: MagicMock) -> None:
+    """A feed that was empty when meed first checked it has no last entry ID: every entry it has now is new."""
+    from meed import main
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([_entry("B", 11), _entry("A", 10)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+    state_db = Path(os.environ["MEED_STATE_DB_PATH"])
+    _write_state_from_before_seen_entries(state_db, feed_url, None)
+
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry A", "Entry B"]
+    assert_seen_entries(state_db, feed_url, {"http://example.com/A", "http://example.com/B"})
+
+
+def test_entries_dropping_out_of_the_feed_are_not_resent(test_env: Path, mock_smtp: MagicMock) -> None:
+    """When the newest entry already sent leaves the feed, only the entries never seen are sent.
+
+    Entries 1 and 2 are seen; the feed then drops 2, keeps 1 and adds 3. Only 3 is sent.
+    """
+    from meed import main
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([_entry("2", 11), _entry("1", 10)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+    feed_file.write_text(create_rss_feed([_entry("3", 12), _entry("1", 10)]))
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry 3"]
+
+
+def test_reordered_entries_are_not_resent(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Entries with the same date that the feed lists in a different order on a later run are not sent again."""
+    from meed import main
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([_entry("1", 10)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+    feed_file.write_text(create_rss_feed([_entry("B", 11), _entry("A", 11), _entry("1", 10)]))
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry A", "Entry B"]
+
+    mock_smtp.reset_mock()
+    feed_file.write_text(create_rss_feed([_entry("A", 11), _entry("B", 11), _entry("1", 10)]))
+    main()
+
+    assert_no_emails_sent(mock_smtp)

@@ -132,6 +132,19 @@ def test_add_feed_to_file_reuses_existing_category(tmp_path: Path) -> None:
     assert blog1_index < blog2_index < news_index
 
 
+def test_add_feed_to_file_keeps_the_category_together(tmp_path: Path) -> None:
+    """A URL added to a category goes right after its last URL, keeping the blank line between categories."""
+    feeds_file = tmp_path / "feeds.txt"
+    feeds_file.write_text("# Blogs\nhttps://blog1.com/feed\n\n# News\nhttps://news1.com/feed")
+
+    add_feed_to_file(feeds_file, "https://blog2.com/feed", "Blogs")
+    add_feed_to_file(feeds_file, "https://news2.com/feed", "News")
+
+    assert feeds_file.read_text() == (
+        "# Blogs\nhttps://blog1.com/feed\nhttps://blog2.com/feed\n\n# News\nhttps://news1.com/feed\nhttps://news2.com/feed\n"
+    )
+
+
 def test_add_feed_to_file_category_at_end(tmp_path: Path) -> None:
     """Test adding feed to category that's at the end of file."""
     feeds_file = tmp_path / "feeds.txt"
@@ -223,6 +236,32 @@ def test_process_email_with_valid_feed(tmp_path: Path, monkeypatch: MonkeyPatch)
     content = feeds_file.read_text()
     assert "https://example.com/feed" in content
     assert "# Blogs" in content
+
+
+def test_process_email_skips_a_feed_already_listed(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A feed already in the feeds file is not added again, under any category, and is not fetched."""
+    from unittest.mock import MagicMock
+
+    from meed import process_email
+
+    feeds_file = tmp_path / "feeds.txt"
+    feeds_file.write_text("# Blogs\nhttps://example.com/feed\n")
+    monkeypatch.setenv("MEED_FEEDS_FILE_PATH", str(feeds_file))
+
+    def fail_validation(url: str) -> bool:
+        msg = f"{url} was fetched"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("meed.is_valid_feed", fail_validation)
+    mock_msg = MagicMock(uid="12345", text="https://example.com/feed\nNews", html=None)
+    caplog.set_level("INFO")
+
+    process_email(mock_msg)
+
+    assert feeds_file.read_text() == "# Blogs\nhttps://example.com/feed\n"
+    assert "Feed https://example.com/feed is already in the feeds file" in caplog.messages
 
 
 def test_process_email_with_invalid_feed(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
