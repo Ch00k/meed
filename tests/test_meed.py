@@ -1265,6 +1265,19 @@ def test_job_function_exception_handling(monkeypatch: pytest.MonkeyPatch) -> Non
     job()
 
 
+def test_main_sets_network_timeout() -> None:
+    """main() bounds every network operation, so a stalled connection cannot keep a run going."""
+    import socket
+
+    from meed import NETWORK_TIMEOUT, main
+
+    try:
+        main()
+        assert socket.getdefaulttimeout() == NETWORK_TIMEOUT
+    finally:
+        socket.setdefaulttimeout(None)
+
+
 def test_logging_json_formatter_with_extra() -> None:
     """Test MeedJSONFormatter with extra attributes."""
     import logging

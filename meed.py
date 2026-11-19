@@ -1,5 +1,6 @@
 import logging
 import smtplib
+import socket
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -69,6 +70,10 @@ IMAP_PASSWORD = env.str("MEED_IMAP_PASSWORD", None)
 IMAP_MAILBOX = env.str("MEED_IMAP_MAILBOX", "INBOX.meed")
 
 SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
+
+# Seconds a feed fetch, SMTP or IMAP connection may stall. Without a limit, one stalled connection keeps the run,
+# and the Machine it runs on, going forever.
+NETWORK_TIMEOUT = 60
 
 SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
 SQL_GET_STATE = "SELECT last_checked_at, last_entry_id FROM feeds WHERE id = ?"
@@ -461,6 +466,8 @@ def main() -> None:
     """Run one check and return. meed does not schedule itself: whatever starts it decides how often."""
     logger.info("Starting meed...")
     logger.info(f"Using User-Agent: {USER_AGENT}")
+    # feedparser, smtplib and imaplib open their sockets without a timeout of their own, so they use this one.
+    socket.setdefaulttimeout(NETWORK_TIMEOUT)
     create_state_table()
     job()
 

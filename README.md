@@ -27,9 +27,9 @@ roughly once an hour (at a time of its choosing, not on the hour), and it stops 
 it runs are billed. The feed list and the state database live on a volume mounted at `/data`.
 
 There is no `fly.toml` on purpose. `fly deploy` manages only Machines that belong to a process group in `fly.toml`, does
-not keep a Machine's schedule, and creates Machines that restart when their process exits. The scheduled Machine is
-created once by hand, and every release tag updates its image in place (the `deploy` job in
-`.github/workflows/ci.yml`).
+not keep a Machine's schedule, and creates Machines that restart when their process exits. Instead, every release tag
+replaces the scheduled Machine with a new one (the `deploy` job in `.github/workflows/ci.yml`), which runs a check
+straight away and then hourly.
 
 ### One-time setup
 
@@ -46,19 +46,17 @@ created once by hand, and every release tag updates its image in place (the `dep
    Without a `state.db`, the first run records every feed's current entries and sends nothing.
    ```bash
    fly machine run . --app meed --region fra --name seed --volume meed_data:/data --restart no sleep 900
+   ```
+   flyctl finds a Machine by its ID only, not by its name: take the ID from the output above (or `fly machine list
+   --app meed`).
+   ```bash
    fly ssh sftp put feeds.txt /data/feeds.txt --app meed --machine <seed machine id>
    fly ssh sftp put state.db /data/state.db --app meed --machine <seed machine id>
-   fly machine destroy seed --app meed --force
+   fly machine destroy <seed machine id> --app meed --force
    ```
 
-3. Create the scheduled Machine. It runs once straight away, then hourly. `--restart no` matters: with the default
-   policy, Fly restarts **meed** every time it exits.
-   ```bash
-   fly machine run . --app meed --region fra --name meed --volume meed_data:/data \
-       --vm-size shared-cpu-1x --vm-memory 256 --restart no --schedule hourly
-   ```
-
-4. Give CI a deploy token, which the `deploy` job uses on every release tag:
+3. Give CI a deploy token, then push a release tag (`make release-patch`): its `deploy` job creates the scheduled
+   Machine.
    ```bash
    fly tokens create deploy --app meed | gh secret set FLY_API_TOKEN
    ```

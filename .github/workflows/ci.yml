@@ -80,20 +80,22 @@ jobs:
           flyctl auth docker
           docker push "$IMAGE"
 
-      # --skip-start leaves the next run to the schedule instead of starting one now.
-      - name: Update the Machine
+      # The Machine is replaced rather than updated: `fly machine update` can drop a Machine from Fly's scheduler while
+      # its config still says hourly, while a new Machine's schedule starts with the Machine. Without --force, Fly
+      # refuses to destroy a Machine that is running a check, so a deploy never cuts one short; re-run the job then.
+      - name: Replace the Machine
         run: |
           machines=$(flyctl machine list --app meed --json | jq -r '.[].id')
-          if [ "$(echo "$machines" | wc -w)" -ne 1 ]; then
-            echo "Expected exactly one Machine in app meed, found: $machines"
+          if [ "$(echo "$machines" | wc -w)" -gt 1 ]; then
+            echo "Expected at most one Machine in app meed, found: $machines"
             exit 1
           fi
-          flyctl machine update "$machines" --app meed --image "$IMAGE" --skip-start --yes
+          if [ -n "$machines" ]; then
+            flyctl machine destroy "$machines" --app meed
+          fi
+          flyctl machine run "$IMAGE" --app meed --region fra --name meed --volume meed_data:/data \
+            --vm-size shared-cpu-1x --vm-memory 256 --restart no --schedule hourly --detach
 
-      # A Machine that lost its schedule never runs again, and one restarted on exit runs in a loop. Neither shows up
-      # anywhere else, so fail the deploy instead.
-      - name: Check the Machine is still scheduled
-        run: |
-          flyctl machine list --app meed --json \
-            | jq -e '.[0].config | .schedule == "hourly" and .restart.policy == "no"' \
-            || { flyctl machine list --app meed --json | jq '.[0].config | {schedule, restart}'; exit 1; }
+      # The new Machine runs one check straight away. One that never stops holds the schedule, and the bill, forever.
+      - name: Wait for the first check to finish
+        run: flyctl machine wait "$(flyctl machine list --app meed --json | jq -r '.[0].id')" --app meed --state stopped
