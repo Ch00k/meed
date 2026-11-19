@@ -791,6 +791,48 @@ def test_duplicate_entries_in_feed(test_env: Path, mock_smtp: MagicMock) -> None
     assert "Entry 3" in email_str
 
 
+def test_new_entry_listed_twice_is_sent_once(test_env: Path, mock_smtp: MagicMock) -> None:
+    """A new entry that the feed lists twice, with the same ID, is sent once."""
+    from meed import main
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([_entry("1", 10)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+    feed_file.write_text(create_rss_feed([_entry("2", 11), _entry("2", 11), _entry("1", 10)]))
+    main()
+
+    assert _sent_subjects(mock_smtp) == ["Entry 2"]
+
+
+def test_entries_with_only_a_title_are_told_apart_by_date(test_env: Path, mock_smtp: MagicMock) -> None:
+    """Entries with no ID and no link, which repeat a title as a daily post does, are each sent once."""
+    from meed import main
+
+    def daily(hour: int) -> dict:
+        return create_feed_entry(
+            None, "Daily Update", f"Summary {hour}", None, f"Mon, 01 Jan 2025 {hour:02d}:00:00 GMT"
+        )
+
+    feed_file = test_env / "data" / "feed.xml"
+    feed_file.write_text(create_rss_feed([daily(10)]))
+    feed_url = f"file://{feed_file}"
+    create_feeds_file([feed_url], Path(os.environ["MEED_FEEDS_FILE_PATH"]))
+
+    main()
+    feed_file.write_text(create_rss_feed([daily(11), daily(10)]))
+    main()
+
+    assert get_email_count(mock_smtp) == 1
+    assert_seen_entries(
+        Path(os.environ["MEED_STATE_DB_PATH"]),
+        feed_url,
+        {"Daily Update 2025-01-01T10:00:00Z", "Daily Update 2025-01-01T11:00:00Z"},
+    )
+
+
 def test_very_old_entry_added(test_env: Path, mock_smtp: MagicMock) -> None:
     """Test 19: An entry that appears with a date older than entries already sent is new, and is sent."""
     from meed import main
@@ -1799,7 +1841,8 @@ def _write_state_from_before_seen_entries(db_path: Path, feed_url: str, last_ent
 def test_state_from_before_seen_entries_is_converted(test_env: Path, mock_smtp: MagicMock) -> None:
     """A feed's last entry ID from before seen entries becomes seen entries: it and everything listed after it.
 
-    The entries listed before it are new and are sent, oldest first; the stored last entry ID is cleared.
+    The entries listed before it are new and are sent, oldest first. The last entry ID keeps following the entries
+    sent, so that an earlier release run on the same database finds a valid one.
     """
     from meed import main
 
@@ -1818,7 +1861,9 @@ def test_state_from_before_seen_entries_is_converted(test_env: Path, mock_smtp: 
         feed_url,
         {"http://example.com/A", "http://example.com/B", "http://example.com/C", "http://example.com/D"},
     )
-    assert query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,)) == [(None,)]
+    assert query_db(state_db, "SELECT last_entry_id FROM feeds WHERE id = ?", (feed_url,)) == [
+        ("http://example.com/D",)
+    ]
 
     mock_smtp.reset_mock()
     main()
@@ -1829,7 +1874,10 @@ def test_state_from_before_seen_entries_is_converted(test_env: Path, mock_smtp: 
 def test_state_from_before_seen_entries_whose_entry_left_the_feed(
     test_env: Path, mock_smtp: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """When the stored last entry is no longer in the feed, which entries are new cannot be told: none is sent."""
+    """When the stored last entry is no longer in the feed, which entries are new cannot be told: none is sent.
+
+    The stored entry itself is recorded as seen too, so it is not sent when the feed lists it again.
+    """
     from meed import main
 
     feed_file = test_env / "data" / "feed.xml"
@@ -1842,8 +1890,13 @@ def test_state_from_before_seen_entries_whose_entry_left_the_feed(
     main()
 
     assert_no_emails_sent(mock_smtp)
-    assert_seen_entries(state_db, feed_url, {"http://example.com/B", "http://example.com/C"})
+    assert_seen_entries(state_db, feed_url, {"http://example.com/A", "http://example.com/B", "http://example.com/C"})
     assert "Last sent entry http://example.com/A is no longer in feed Test Feed" in caplog.messages
+
+    feed_file.write_text(create_rss_feed([_entry("C", 12), _entry("B", 11), _entry("A", 10)]))
+    main()
+
+    assert_no_emails_sent(mock_smtp)
 
 
 def test_state_from_before_seen_entries_of_a_feed_first_seen_empty(test_env: Path, mock_smtp: MagicMock) -> None:

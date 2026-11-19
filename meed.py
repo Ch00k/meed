@@ -2,6 +2,7 @@ import logging
 import smtplib
 import socket
 import sqlite3
+import time
 import tomllib
 import urllib.error
 from contextlib import contextmanager
@@ -85,8 +86,9 @@ SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
 # and the Machine it runs on, going forever.
 NETWORK_TIMEOUT = 60
 
-# A feed's row says meed knows it. last_entry_id is set only on a row from before meed recorded every entry it has seen:
-# the newest entry it had sent. The first run that finds one turns it into seen entries and clears it.
+# A feed's row says meed knows it. last_entry_id is the entry meed sent last (or the newest one when it first checked
+# the feed): what meed went by before it recorded every entry it has seen, kept up so that an earlier release can still
+# run on this database.
 SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
 # Every entry of a feed meed has seen: emailed, or already in the feed when meed first checked it.
 SQL_CREATE_SEEN_TABLE = (
@@ -94,9 +96,8 @@ SQL_CREATE_SEEN_TABLE = (
     "PRIMARY KEY (feed_id, entry_id))"
 )
 SQL_GET_STATE = "SELECT last_entry_id FROM feeds WHERE id = ?"
-SQL_CREATE_STATE = "INSERT INTO feeds (id, last_checked_at, last_entry_id) VALUES (?, datetime('now'), NULL)"
-SQL_CLEAR_LAST_ENTRY = "UPDATE feeds SET last_entry_id = NULL WHERE id = ?"
-SQL_UPDATE_LAST_CHECKED = "UPDATE feeds SET last_checked_at = datetime('now') WHERE id = ?"
+SQL_CREATE_STATE = "INSERT INTO feeds (id, last_checked_at, last_entry_id) VALUES (?, datetime('now'), ?)"
+SQL_UPDATE_STATE = "UPDATE feeds SET last_checked_at = datetime('now'), last_entry_id = ? WHERE id = ?"
 SQL_GET_SEEN = "SELECT entry_id FROM seen_entries WHERE feed_id = ?"
 SQL_ADD_SEEN = "INSERT OR IGNORE INTO seen_entries (feed_id, entry_id) VALUES (?, ?)"
 
@@ -136,8 +137,12 @@ class FeedEntry(BaseModel):
                 logger.warning("Using link as ID")
                 value["id"] = value["link"]
             elif value.get("title"):
-                logger.warning("Using title as ID")
-                value["id"] = value["title"]
+                logger.warning("Using title and date as ID")
+                # A title alone repeats, as a daily post's does: the date tells such entries apart.
+                date = value.get("published_parsed") or value.get("updated_parsed") or value.get("created_parsed")
+                value["id"] = (
+                    f"{value['title']} {time.strftime('%Y-%m-%dT%H:%M:%SZ', date)}" if date else value["title"]
+                )
             else:
                 raise InvalidFeedEntryError("FeedEntry must have either ID, link, or title")
 
@@ -224,11 +229,18 @@ class Feed(BaseModel):
         return cls(**parsed_feed)  # pyright: ignore[reportArgumentType]
 
     def get_new_entries(self, seen: set[str]) -> list[FeedEntry]:
-        """The entries not seen yet, oldest first.
+        """The entries not seen yet, oldest first, each ID once.
 
         Entries with the same date are sent in the reverse of the feed's order, which lists newer entries first.
         """
-        return [entry for entry in reversed(self.entries) if entry.id not in seen]
+        new_entries = []
+        new_ids = set()
+        for entry in reversed(self.entries):
+            if entry.id not in seen and entry.id not in new_ids:
+                new_ids.add(entry.id)
+                new_entries.append(entry)
+
+        return new_entries
 
     def process(self) -> None:
         if not self.is_known():
@@ -238,11 +250,12 @@ class Feed(BaseModel):
 
         logger.info(f"Feed {self.metadata.title} is known, checking for new entries")
 
+        seen = self.get_seen_entry_ids()
         last_entry_id = self.get_last_entry_id()
-        if last_entry_id is not None:
-            self.convert_last_entry_id(last_entry_id)
+        if not seen and last_entry_id is not None:
+            seen = self.convert_last_entry_id(last_entry_id)
 
-        new_entries = self.get_new_entries(self.get_seen_entry_ids())
+        new_entries = self.get_new_entries(seen)
 
         if new_entries:
             logger.info(f"Found {len(new_entries)} new entries")
@@ -253,7 +266,7 @@ class Feed(BaseModel):
         for entry in new_entries:
             logger.info(f"Sending notification for entry {entry.title} ({entry.link})")
             entry.send_notification(self.metadata.title)
-            self.add_seen_entries([entry.id])
+            self.record_sent(entry.id)
 
     def get_state(self) -> tuple[str | None] | None:
         """The feed's stored row, holding its last entry ID, or None for a feed with no state yet."""
@@ -277,36 +290,42 @@ class Feed(BaseModel):
             cursor.execute(SQL_GET_SEEN, (self.metadata.id,))
             return {row[0] for row in cursor.fetchall()}
 
+    def record_seen(self, cursor: sqlite3.Cursor, entry_ids: list[str]) -> None:
+        logger.debug("Recording entries %s of feed %s as seen", entry_ids, self.metadata.id)
+        cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry_id) for entry_id in entry_ids])
+
     def create_state(self) -> None:
         """Record the feed, with every entry it has now as seen: only entries published from here on are new."""
+        newest_entry = self.entries[0].id if self.entries else None
         with get_db_cursor() as cursor:
-            logger.debug("Executing SQL: %s with params (%s)", SQL_CREATE_STATE, self.metadata.id)
-            cursor.execute(SQL_CREATE_STATE, (self.metadata.id,))
-            cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry.id) for entry in self.entries])
+            logger.debug("Executing SQL: %s with params (%s, %s)", SQL_CREATE_STATE, self.metadata.id, newest_entry)
+            cursor.execute(SQL_CREATE_STATE, (self.metadata.id, newest_entry))
+            self.record_seen(cursor, [entry.id for entry in self.entries])
 
-    def add_seen_entries(self, entry_ids: list[str]) -> None:
+    def record_sent(self, entry_id: str) -> None:
+        """Record an entry whose email was sent as seen, and as the feed's last entry."""
         with get_db_cursor() as cursor:
-            logger.debug("Recording entries %s of feed %s as seen", entry_ids, self.metadata.id)
-            cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry_id) for entry_id in entry_ids])
-            cursor.execute(SQL_UPDATE_LAST_CHECKED, (self.metadata.id,))
+            self.record_seen(cursor, [entry_id])
+            cursor.execute(SQL_UPDATE_STATE, (entry_id, self.metadata.id))
 
-    def convert_last_entry_id(self, last_entry_id: str) -> None:
-        """Turn the newest entry sent, all a feed's state held before seen entries, into seen entries.
+    def convert_last_entry_id(self, last_entry_id: str) -> set[str]:
+        """Turn the last entry sent, all a feed's state held before seen entries, into seen entries, and return them.
 
         That entry and every entry the feed lists after it count as seen. When it has left the feed, which entries
-        are new cannot be told, so all of them count as seen and none is sent.
+        are new cannot be told, so all of them count as seen and none is sent; it stays seen should it come back.
         """
         entry_ids = [entry.id for entry in self.entries]
         if last_entry_id in entry_ids:
             seen = entry_ids[entry_ids.index(last_entry_id) :]
         else:
             logger.warning(f"Last sent entry {last_entry_id} is no longer in feed {self.metadata.title}")
-            seen = entry_ids
+            seen = [last_entry_id, *entry_ids]
 
         logger.info(f"Recording {len(seen)} entries of feed {self.metadata.title} as seen, up to {last_entry_id}")
         with get_db_cursor() as cursor:
-            cursor.executemany(SQL_ADD_SEEN, [(self.metadata.id, entry_id) for entry_id in seen])
-            cursor.execute(SQL_CLEAR_LAST_ENTRY, (self.metadata.id,))
+            self.record_seen(cursor, seen)
+
+        return set(seen)
 
 
 def read_feeds_file(file_path: Path) -> list[str]:
