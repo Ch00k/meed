@@ -133,6 +133,9 @@ def setup_test_env(tmp_path: Path) -> dict[str, str]:
         "MEED_SMTP_PASSWORD": "testpass",
         "MEED_EMAIL_FROM": "from@test.com",
         "MEED_EMAIL_TO": "to@test.com",
+        # Empty, so that IMAP credentials in the developer's environment never reach a real mailbox. Tests of the
+        # email-based feed addition set their own.
+        "MEED_IMAP_HOST": "",
     }
 
 

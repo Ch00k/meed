@@ -1,23 +1,19 @@
 import logging
-import signal
 import smtplib
+import socket
 import sqlite3
-import sys
+import urllib.error
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from email.mime.text import MIMEText
 from importlib.metadata import version
 from pathlib import Path
-from types import FrameType
 from typing import Any
 
 import environs
 import feedparser
 import sentry_sdk
-from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.triggers.cron import CronTrigger
 from dateutil import parser as date_parser
 from imap_tools import MailBox, MailMessageFlags
 from imap_tools.message import MailMessage
@@ -68,8 +64,6 @@ SMTP_PASSWORD = env.str("MEED_SMTP_PASSWORD", "password")
 EMAIL_FROM = env.str("MEED_EMAIL_FROM", "meed@example.com")
 EMAIL_TO = env.str("MEED_EMAIL_TO", "my@e.mail")
 
-CRON_SCHEDULE = env.str("MEED_CRON_SCHEDULE", "0 */4 * * *")
-
 IMAP_HOST = env.str("MEED_IMAP_HOST", None)
 IMAP_PORT = env.int("MEED_IMAP_PORT", 993)
 IMAP_USER = env.str("MEED_IMAP_USER", None)
@@ -77,6 +71,10 @@ IMAP_PASSWORD = env.str("MEED_IMAP_PASSWORD", None)
 IMAP_MAILBOX = env.str("MEED_IMAP_MAILBOX", "INBOX.meed")
 
 SENTRY_DSN = env.str("MEED_SENTRY_DSN", None)
+
+# Seconds a feed fetch, SMTP or IMAP connection may stall. Without a limit, one stalled connection keeps the run,
+# and the Machine it runs on, going forever.
+NETWORK_TIMEOUT = 60
 
 SQL_CREATE_STATE_TABLE = "CREATE TABLE IF NOT EXISTS feeds (id TEXT, last_checked_at DATETIME, last_entry_id TEXT)"
 SQL_GET_STATE = "SELECT last_checked_at, last_entry_id FROM feeds WHERE id = ?"
@@ -201,6 +199,11 @@ class Feed(BaseModel):
     @classmethod
     def from_url(cls, url: str) -> "Feed":
         parsed_feed = feedparser.parse(url, agent=USER_AGENT)
+
+        # feedparser reports a failed fetch as an empty feed. Taken as one, a new feed would get state with no last
+        # entry, and its first successful fetch would email the whole backlog.
+        if isinstance(parsed_feed.get("bozo_exception"), urllib.error.URLError):
+            raise parsed_feed["bozo_exception"]
 
         if "feed" in parsed_feed:
             logger.info(f"Replacing feed ID with URL for feed {url}")
@@ -465,35 +468,14 @@ def job() -> None:
         sentry_sdk.capture_exception(e)
 
 
-def sentry_listener(event: JobExecutionEvent) -> None:
-    if event.exception:
-        sentry_sdk.capture_exception(event.exception)
-
-
-def main(*, run_once: bool = False) -> None:
+def main() -> None:
+    """Run one check and return. meed does not schedule itself: whatever starts it decides how often."""
     logger.info("Starting meed...")
     logger.info(f"Using User-Agent: {USER_AGENT}")
+    # feedparser, smtplib and imaplib open their sockets without a timeout of their own, so they use this one.
+    socket.setdefaulttimeout(NETWORK_TIMEOUT)
     create_state_table()
-
-    if run_once:
-        check_feeds()
-        return
-
-    logger.info(f"Creating schedule with crontab '{CRON_SCHEDULE}'")
-
-    scheduler = BlockingScheduler()
-
-    # TODO: This does not seem to work - nothing in Sentry
-    scheduler.add_listener(sentry_listener, mask=EVENT_JOB_ERROR)
-    scheduler.add_job(job, CronTrigger.from_crontab(CRON_SCHEDULE))
-
-    def signal_handler_scheduler(_: int, __: FrameType | None) -> None:
-        scheduler.shutdown()
-
-    for s in [signal.SIGHUP, signal.SIGINT, signal.SIGTERM]:
-        signal.signal(s, signal_handler_scheduler)
-
-    scheduler.start()
+    job()
 
 
 if __name__ == "__main__":
@@ -508,9 +490,4 @@ if __name__ == "__main__":
     if SENTRY_DSN:
         sentry_sdk.init(dsn=SENTRY_DSN)
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--once":
-        run_once = True
-    else:
-        run_once = False
-
-    main(run_once=run_once)
+    main()

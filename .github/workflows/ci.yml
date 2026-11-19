@@ -45,6 +45,78 @@ jobs:
       contents: write
     steps:
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+
+  # meed runs as one scheduled Fly Machine (see "Deployment" in README.md). `fly deploy` is not used: it manages only
+  # Machines in a fly.toml process group and would not keep the schedule. The Machine is updated in place instead.
+  deploy:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: test
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      IMAGE: registry.fly.io/meed:${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Fly registry tokens expire in about five minutes, so authenticate after the build.
+      - name: Push image to Fly registry
+        run: |
+          flyctl auth docker
+          docker push "$IMAGE"
+
+      # The Machine is replaced rather than updated: `fly machine update` can drop a Machine from Fly's scheduler while
+      # its config still says hourly, while a new Machine's schedule starts with the Machine. Without --force, Fly
+      # refuses to destroy a Machine that is running a check, so a deploy never cuts one short; re-run the job then.
+      # The volume is given by ID: given a name, flyctl creates a new, empty volume when it finds none unattached.
+      - name: Replace the Machine
+        run: |
+          volumes=$(flyctl volumes list --app meed --json | jq -r '.[] | select(.name == "meed_data") | .id')
+          if [ "$(echo "$volumes" | wc -w)" -ne 1 ]; then
+            echo "Expected exactly one meed_data volume in app meed, found: $volumes"
+            exit 1
+          fi
+          machines=$(flyctl machine list --app meed --json | jq -r '.[].id')
+          if [ "$(echo "$machines" | wc -w)" -gt 1 ]; then
+            echo "Expected at most one Machine in app meed, found: $machines"
+            exit 1
+          fi
+          if [ -n "$machines" ]; then
+            flyctl machine destroy "$machines" --app meed
+            flyctl machine wait "$machines" --app meed --state destroyed
+          fi
+          flyctl machine run "$IMAGE" --app meed --region fra --name meed --volume "$volumes:/data" \
+            --vm-size shared-cpu-1x --vm-memory 256 --restart no --schedule hourly --detach
+
+      # The new Machine runs one check straight away. One that never stops holds the schedule, and the bill, forever,
+      # and one that fails would fail every hour. With --restart no, a crash also ends in `stopped`, so read how it
+      # exited. Polled rather than `flyctl machine wait`, which gives up after a few minutes whatever --wait-timeout
+      # says. A run still going after 15 minutes has no exit event, which fails the check. Fly omits zero values from
+      # the exit event, records it in one of two places, and reports "no signal" as -1.
+      - name: Check the first run
+        run: |
+          for _ in $(seq 90); do
+            [ "$(flyctl machine list --app meed --json | jq -r '.[0].state')" = stopped ] && break
+            sleep 10
+          done
+          flyctl machine list --app meed --json > machines.json
+          jq 'first(.[0].events[] | select(.type == "exit"))' machines.json
+          jq -e '
+            first(.[0].events[] | select(.type == "exit")).request
+            | (.MonitorEvent.exit_event // .exit_event)
+            | . != null and (.exit_code // 0) == 0 and (.signal // 0) <= 0 and (.oom_killed // false | not)' machines.json
